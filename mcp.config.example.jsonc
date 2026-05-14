@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "frida-flex": {
+      "type": "local",
+      "command": [
+        "python",
+        "C:\\Users\\Edwinn\\Desktop\\flexing mcp\\flex_mcp_server.py"
+      ],
+      "enabled": true
+    }
+  }
+}
