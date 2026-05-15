@@ -115,7 +115,9 @@ def _exec_js_once(session, js_code, timeout):
         "do ", "throw ", "debugger ", "//", "/*",
     ]) and "\n" not in stripped
 
-    if is_expr:
+    if stripped.startswith('(function') and stripped.endswith('})()'):
+        body = "var __r = " + stripped + ";"
+    elif is_expr:
         body = "var __r = " + js_code + ";"
     else:
         lines = [l for l in stripped.split("\n") if l.strip()]
