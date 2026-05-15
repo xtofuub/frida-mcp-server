@@ -15,8 +15,10 @@
     "LICENSE"
   ],
   "scripts": {
+    "postinstall": "node bin/cli.js install --from-postinstall",
     "start": "node bin/cli.js serve",
     "install:mcp": "node bin/cli.js install",
+    "register": "node bin/cli.js register",
     "config": "node bin/cli.js config",
     "doctor": "node bin/cli.js doctor"
   },

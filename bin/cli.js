@@ -10,7 +10,10 @@ const SKILLS_ROOT = path.join(PKG_ROOT, 'skills');
 const SERVER_PATH = path.join(PKG_ROOT, 'flex_mcp_server.py');
 const CLI_PATH = path.join(PKG_ROOT, 'bin', 'cli.js');
 const HOME = os.homedir();
+const APPDATA = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
+const XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const PYTHON = process.env.FLEX_MCP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+const SERVER_NAME = 'frida-flex';
 
 const AGENTS = {
   'Claude Code': path.join(HOME, '.claude'),
@@ -30,20 +33,25 @@ const commandArgs = hasCommand ? rawArgs.slice(1) : rawArgs;
 
 const force = commandArgs.includes('--force') || commandArgs.includes('-f');
 const dryRun = commandArgs.includes('--dry-run');
+const noConfig = commandArgs.includes('--no-config');
+const noSkills = commandArgs.includes('--no-skills');
 const installClaudeCode = commandArgs.includes('--claude-code');
+const fromPostinstall = commandArgs.includes('--from-postinstall');
 
 function printHelp() {
   console.log(`flex-mcp-server
 
 Usage:
-  flex-mcp-server install [--force] [--claude-code]
+  flex-mcp-server install [--force] [--no-config] [--no-skills] [--claude-code]
+  flex-mcp-server register [--claude-code]
   flex-mcp-server serve [server args...]
   flex-mcp-server config
   flex-mcp-server path
   flex-mcp-server doctor
 
 Commands:
-  install        Install bundled skills into detected agent dirs and print MCP config.
+  install        Install bundled skills and register MCP configs for detected clients.
+  register       Register MCP configs without copying skills.
   serve          Start the Python MCP server over stdio. Pass server args after serve.
   config         Print the stdio MCP config for this install.
   path           Print the absolute path to flex_mcp_server.py.
@@ -51,11 +59,14 @@ Commands:
 
 Options:
   --force        Overwrite existing installed skill directories.
-  --claude-code  Also run: claude mcp add frida-flex flex-mcp-server serve
-  --dry-run      Show what would be installed without copying files.
+  --no-config    Skip MCP config registration.
+  --no-skills    Skip bundled skill installation.
+  --claude-code  Force a Claude Code CLI registration attempt.
+  --dry-run      Show what would be installed or configured without writing files.
 
 Environment:
-  FLEX_MCP_PYTHON  Python command to use for serve/config/doctor. Default: ${PYTHON}
+  FLEX_MCP_PYTHON             Python command used by generated MCP configs. Default: ${PYTHON}
+  FLEX_MCP_SKIP_AUTO_INSTALL  Set to 1 to disable npm postinstall auto-registration.
 `);
 }
 
@@ -84,19 +95,219 @@ function getSkillDirs() {
     .map((entry) => ({ name: entry.name, src: path.join(SKILLS_ROOT, entry.name) }));
 }
 
+function getMcpServerConfig() {
+  return {
+    command: PYTHON,
+    args: [SERVER_PATH],
+  };
+}
+
 function getMcpConfig() {
   return {
     mcpServers: {
-      'frida-flex': {
-        command: PYTHON,
-        args: [SERVER_PATH],
-      },
+      [SERVER_NAME]: getMcpServerConfig(),
     },
+  };
+}
+
+function getOpenCodeConfig() {
+  return {
+    type: 'local',
+    command: [PYTHON, SERVER_PATH],
+    enabled: true,
   };
 }
 
 function printMcpConfig() {
   console.log(JSON.stringify(getMcpConfig(), null, 2));
+}
+
+function stripJsonComments(input) {
+  let output = '';
+  let inString = false;
+  let stringQuote = '';
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    const next = input[i + 1];
+
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === stringQuote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      inString = true;
+      stringQuote = char;
+      output += char;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      while (i < input.length && input[i] !== '\n') i += 1;
+      output += '\n';
+      continue;
+    }
+
+    if (char === '/' && next === '*') {
+      i += 2;
+      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) i += 1;
+      i += 1;
+      continue;
+    }
+
+    output += char;
+  }
+
+  return output;
+}
+
+function stripTrailingCommas(input) {
+  let output = '';
+  let inString = false;
+  let stringQuote = '';
+  let escaped = false;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+
+    if (inString) {
+      output += char;
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === stringQuote) {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"' || char === "'") {
+      inString = true;
+      stringQuote = char;
+      output += char;
+      continue;
+    }
+
+    if (char === ',') {
+      let j = i + 1;
+      while (j < input.length && /\s/.test(input[j])) j += 1;
+      if (input[j] === '}' || input[j] === ']') continue;
+    }
+
+    output += char;
+  }
+
+  return output;
+}
+
+function readJsonLike(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const raw = fs.readFileSync(filePath, 'utf8').trim();
+  if (!raw) return {};
+  return JSON.parse(stripTrailingCommas(stripJsonComments(raw)));
+}
+
+function stableJson(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function backupFile(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const backupPath = `${filePath}.bak-${stamp}`;
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+function writeIfChanged(filePath, content) {
+  const previous = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : null;
+  if (previous === content) return { changed: false, backup: null };
+  if (!dryRun) {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const backup = backupFile(filePath);
+    fs.writeFileSync(filePath, content);
+    return { changed: true, backup };
+  }
+  return { changed: true, backup: null };
+}
+
+function mergeMcpServersConfig(filePath) {
+  const config = readJsonLike(filePath);
+  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+    config.mcpServers = {};
+  }
+  config.mcpServers[SERVER_NAME] = getMcpServerConfig();
+  return writeIfChanged(filePath, stableJson(config));
+}
+
+function mergeOpenCodeConfig(filePath) {
+  const config = readJsonLike(filePath);
+  if (!config.mcp || typeof config.mcp !== 'object') {
+    config.mcp = {};
+  }
+  config.mcp[SERVER_NAME] = getOpenCodeConfig();
+  return writeIfChanged(filePath, stableJson(config));
+}
+
+function tomlString(value) {
+  return JSON.stringify(value);
+}
+
+function getCodexTomlBlock() {
+  return [
+    '# flex-mcp-server start',
+    `[mcp_servers.${SERVER_NAME}]`,
+    `command = ${tomlString(PYTHON)}`,
+    `args = [${tomlString(SERVER_PATH)}]`,
+    '# flex-mcp-server end',
+    '',
+  ].join('\n');
+}
+
+function mergeCodexToml(filePath) {
+  const block = getCodexTomlBlock();
+  const content = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  const markerPattern = /# flex-mcp-server start[\s\S]*?# flex-mcp-server end\n?/m;
+  const tablePattern = /^\[mcp_servers\.frida-flex\][\s\S]*?(?=^\[|$(?![\s\S]))/m;
+  let next;
+
+  if (markerPattern.test(content)) {
+    next = content.replace(markerPattern, block);
+  } else if (tablePattern.test(content)) {
+    next = content.replace(tablePattern, block);
+  } else {
+    next = `${content.replace(/\s*$/, '')}\n\n${block}`;
+  }
+
+  return writeIfChanged(filePath, next);
+}
+
+function pathExists(p) {
+  try {
+    return fs.existsSync(p);
+  } catch (_) {
+    return false;
+  }
+}
+
+function commandExists(cmd) {
+  const check = process.platform === 'win32' ? 'where' : 'command';
+  const args = process.platform === 'win32' ? [cmd] : ['-v', cmd];
+  const result = spawnSync(check, args, {
+    stdio: 'ignore',
+    shell: process.platform !== 'win32',
+  });
+  return result.status === 0;
 }
 
 function installSkills() {
@@ -151,36 +362,159 @@ function installSkills() {
     console.log('  No known agent directories were found. Skill install skipped.');
   }
 
-  console.log(`\nDone. ${dryRun ? 'would_install' : 'installed'}=${totalInstalled}, skipped=${totalSkipped}`);
+  console.log(`\nSkills done. ${dryRun ? 'would_install' : 'installed'}=${totalInstalled}, skipped=${totalSkipped}`);
+}
+
+function getConfigTargets() {
+  const targets = [];
+
+  const claudeDesktopPath = process.platform === 'darwin'
+    ? path.join(HOME, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json')
+    : process.platform === 'win32'
+      ? path.join(APPDATA, 'Claude', 'claude_desktop_config.json')
+      : path.join(XDG_CONFIG_HOME, 'Claude', 'claude_desktop_config.json');
+  if (pathExists(claudeDesktopPath) || pathExists(path.dirname(claudeDesktopPath))) {
+    targets.push({
+      name: 'Claude Desktop',
+      filePath: claudeDesktopPath,
+      kind: 'mcpServersJson',
+      register: mergeMcpServersConfig,
+    });
+  }
+
+  if (pathExists(AGENTS.Cursor)) {
+    targets.push({
+      name: 'Cursor',
+      filePath: path.join(AGENTS.Cursor, 'mcp.json'),
+      kind: 'mcpServersJson',
+      register: mergeMcpServersConfig,
+    });
+  }
+
+  if (pathExists(AGENTS.OpenCode)) {
+    const existingOpenCodePaths = [
+      path.join(XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'),
+      path.join(APPDATA, 'opencode', 'opencode.jsonc'),
+      path.join(AGENTS.OpenCode, 'opencode.jsonc'),
+      path.join(AGENTS.OpenCode, 'config.jsonc'),
+    ].filter(pathExists);
+    const openCodePath = existingOpenCodePaths[0] || path.join(XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc');
+    targets.push({
+      name: 'OpenCode',
+      filePath: openCodePath,
+      kind: 'opencodeJsonc',
+      register: mergeOpenCodeConfig,
+    });
+  }
+
+  if (pathExists(AGENTS.Codex)) {
+    targets.push({
+      name: 'Codex',
+      filePath: path.join(AGENTS.Codex, 'config.toml'),
+      kind: 'codexToml',
+      register: mergeCodexToml,
+    });
+  }
+
+  return targets;
 }
 
 function installClaudeCodeMcp() {
-  console.log('\nInstalling MCP server into Claude Code...\n');
+  if (!pathExists(AGENTS['Claude Code']) && !installClaudeCode) {
+    return { attempted: false, configured: false, skipped: true, message: 'Claude Code not detected' };
+  }
+
+  if (!commandExists('claude')) {
+    return {
+      attempted: true,
+      configured: false,
+      skipped: true,
+      message: 'claude CLI not found; run: claude mcp add frida-flex flex-mcp-server serve',
+    };
+  }
+
+  if (dryRun) {
+    return {
+      attempted: true,
+      configured: true,
+      message: 'would run: claude mcp add frida-flex flex-mcp-server serve',
+    };
+  }
+
   const result = spawnSync(
     'claude',
-    ['mcp', 'add', 'frida-flex', 'flex-mcp-server', 'serve'],
-    { stdio: 'inherit', shell: process.platform === 'win32' },
+    ['mcp', 'add', SERVER_NAME, 'flex-mcp-server', 'serve'],
+    { encoding: 'utf8', shell: process.platform === 'win32' },
   );
 
   if (result.error || result.status !== 0) {
-    console.log('\nClaude Code install did not complete.');
-    console.log('Run this manually after installing Claude Code:');
-    console.log('  claude mcp add frida-flex flex-mcp-server serve');
+    const detail = (result.stderr || result.stdout || result.error?.message || '').trim();
+    return {
+      attempted: true,
+      configured: false,
+      skipped: false,
+      message: detail || 'Claude Code registration did not complete',
+    };
   }
+
+  return { attempted: true, configured: true, skipped: false, message: 'registered with claude mcp add' };
+}
+
+function registerMcpConfigs() {
+  console.log(`\nflex-mcp-server: ${dryRun ? 'checking' : 'registering'} MCP configs\n`);
+
+  const targets = getConfigTargets();
+  let configured = 0;
+  let unchanged = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const target of targets) {
+    try {
+      const result = target.register(target.filePath);
+      if (result.changed) configured += 1;
+      else unchanged += 1;
+      const action = result.changed ? (dryRun ? 'would_configure' : 'configured') : 'already_configured';
+      console.log(`  ${target.name}: ${action} ${target.filePath}`);
+      if (result.backup) console.log(`    backup: ${result.backup}`);
+    } catch (error) {
+      failed += 1;
+      console.log(`  ${target.name}: failed ${target.filePath}`);
+      console.log(`    ${error.message}`);
+    }
+  }
+
+  const claudeResult = installClaudeCodeMcp();
+  if (claudeResult.attempted) {
+    if (claudeResult.configured) configured += 1;
+    else if (claudeResult.skipped) skipped += 1;
+    else failed += 1;
+    console.log(`  Claude Code: ${claudeResult.configured ? (dryRun ? 'would_configure' : 'configured') : 'skipped'}`);
+    console.log(`    ${claudeResult.message}`);
+  }
+
+  if (targets.length === 0 && !claudeResult.attempted) {
+    console.log('  No supported MCP client config targets were detected.');
+  }
+
+  console.log(`\nConfigs done. ${dryRun ? 'would_configure' : 'configured'}=${configured}, unchanged=${unchanged}, skipped=${skipped}, failed=${failed}`);
+  return { configured, unchanged, skipped, failed };
 }
 
 function install() {
-  installSkills();
-
-  if (installClaudeCode && !dryRun) {
-    installClaudeCodeMcp();
+  if (fromPostinstall && process.env.FLEX_MCP_SKIP_AUTO_INSTALL === '1') {
+    console.log('flex-mcp-server: npm postinstall auto-registration skipped by FLEX_MCP_SKIP_AUTO_INSTALL=1');
+    return;
   }
 
-  console.log('\nAdd this to any stdio MCP client config:\n');
+  if (!noSkills) installSkills();
+  if (!noConfig) registerMcpConfigs();
+
+  console.log('\nCurrent stdio MCP config:\n');
   printMcpConfig();
   console.log('\nUseful commands:');
-  console.log('  flex-mcp-server serve --transport sse --port 8099');
   console.log('  flex-mcp-server doctor');
+  console.log('  flex-mcp-server serve --transport sse --port 8099');
   console.log();
 }
 
@@ -221,6 +555,9 @@ function doctor() {
   const skills = getSkillDirs();
   check('bundled skills', skills.length > 0, `${skills.length} found`);
 
+  const configTargets = getConfigTargets();
+  check('supported config targets', configTargets.length > 0 || pathExists(AGENTS['Claude Code']), `${configTargets.length} file target(s)`);
+
   const py = spawnSync(PYTHON, ['-c', 'import sys; print(sys.version.split()[0])'], {
     encoding: 'utf8',
     shell: process.platform === 'win32',
@@ -249,6 +586,8 @@ if ((command === 'help') || (command !== 'serve' && (rawArgs.includes('--help') 
 
 if (command === 'install') {
   install();
+} else if (command === 'register') {
+  registerMcpConfigs();
 } else if (command === 'serve') {
   serve();
 } else if (command === 'config') {

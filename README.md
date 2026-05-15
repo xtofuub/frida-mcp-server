@@ -10,21 +10,23 @@ Use this only on apps, devices, and programs where you have explicit authorizati
 
 ### Claude Code one-liner
 
-After you have installed the required Python packages yourself, this installs the CLI globally from GitHub, installs the bundled skill, and registers the MCP server with Claude Code:
+After you have installed the required Python packages yourself, this installs the CLI globally from GitHub, installs the bundled skill, and registers the MCP server in detected client configs:
 
 ```bash
-npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install --claude-code
+npm install -g github:xtofuub/flex-mcp-server
 ```
+
+The npm `postinstall` step runs `flex-mcp-server install` automatically. For Claude Code, it attempts `claude mcp add frida-flex flex-mcp-server serve` when the `claude` CLI is available.
 
 ### Any MCP client
 
-Use this when your client expects you to paste MCP JSON manually:
+If npm scripts were disabled, rerun the installer manually:
 
 ```bash
 npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
 ```
 
-The installer prints the exact stdio MCP config for your machine. A globally installed config can also use:
+The installer writes config entries for detected supported clients and also prints the exact stdio MCP config for manual setup:
 
 ```json
 {
@@ -35,6 +37,12 @@ The installer prints the exact stdio MCP config for your machine. A globally ins
     }
   }
 }
+```
+
+To install the package without touching local agent folders or MCP configs:
+
+```bash
+FLEX_MCP_SKIP_AUTO_INSTALL=1 npm install -g github:xtofuub/flex-mcp-server
 ```
 
 If your system uses `python3` instead of `python`, set the launcher before running the installer:
@@ -71,7 +79,7 @@ Clone the repo and run the installer from source:
 ```bash
 git clone https://github.com/xtofuub/flex-mcp-server.git
 cd flex-mcp-server
-npm install
+FLEX_MCP_SKIP_AUTO_INSTALL=1 npm install
 node bin/cli.js install
 ```
 
@@ -80,16 +88,33 @@ For a source checkout, the installer prints a config that points at the local `f
 ## CLI
 
 ```bash
-flex-mcp-server install          # install bundled skills and print MCP config
+flex-mcp-server install          # install bundled skills and register detected MCP configs
 flex-mcp-server install --force  # overwrite existing skill installs
 flex-mcp-server install --claude-code
+flex-mcp-server register         # register detected MCP configs without copying skills
+flex-mcp-server install --no-config
+flex-mcp-server install --no-skills
 flex-mcp-server serve            # start the MCP server over stdio
 flex-mcp-server config           # print the MCP config for this install
 flex-mcp-server path             # print the Python server path
 flex-mcp-server doctor           # check Python, packages, and bundled files
 ```
 
-`flex-mcp-server serve` is the command MCP clients should run when the package is installed globally.
+The generated MCP configs use the Python launcher and absolute `flex_mcp_server.py` path for reliability. `flex-mcp-server serve` is also available when you want a command-based config.
+
+## Automatic Config Registration
+
+The installer updates the clients it can detect on the current machine:
+
+| Client | Registration behavior |
+| --- | --- |
+| Claude Code | Runs `claude mcp add frida-flex flex-mcp-server serve` if the `claude` CLI is available. |
+| Claude Desktop | Updates `claude_desktop_config.json` when the Claude config directory exists. |
+| Cursor | Updates `~/.cursor/mcp.json` when `~/.cursor` exists. |
+| OpenCode | Updates or creates `opencode.jsonc` when `~/.opencode` exists. |
+| Codex | Updates `~/.codex/config.toml` when `~/.codex` exists. |
+
+Existing config files get a timestamped `.bak-*` backup before they are changed. Unsupported clients still get the bundled skill when their skill directory is detected, but their MCP config may need manual setup.
 
 ## Remote SSE Mode
 
@@ -122,7 +147,7 @@ Do not expose the SSE port to an untrusted network. The server can execute Frida
 
 ## What The Install Gives Your Agent
 
-`flex-mcp-server install --claude-code` gives Claude Code two things:
+The npm install flow gives supported agents two things:
 
 1. A `frida-flex` MCP server that exposes the `flex_*` tools below.
 2. The bundled `reverse-engineering-ios-app-with-frida` skill, copied into detected agent skill directories.
