@@ -82,13 +82,24 @@ def _cleanup_session(sid):
 
 # ── JS execution engine ─────────────────────────────────────────────────
 
+# Permanent-failure exceptions: bail without retrying. Names vary across frida
+# versions (no InvalidStateError in 16.x), so resolve defensively.
+_FRIDA_FATAL = tuple(
+    cls for cls in (
+        getattr(frida, "InvalidOperationError", None),
+        getattr(frida, "InvalidStateError", None),
+        getattr(frida, "ProcessNotFoundError", None),
+    ) if cls is not None
+)
+
+
 def exec_js(session, js_code, timeout=20, retries=2):
     """Execute JS on mainQueue with retry support."""
     last_err = None
     for attempt in range(1 + retries):
         try:
             return _exec_js_once(session, js_code, timeout)
-        except frida.InvalidStateError:
+        except _FRIDA_FATAL:
             raise
         except Exception as e:
             last_err = e
@@ -273,6 +284,8 @@ def connect(bundle_id: str) -> dict:
         return {
             "success": True, "session_id": sid, "method": method,
             "network_capture": net_ack.get("ok", False),
+            "hooks_installed": net_ack.get("hooks", 0),
+            "hooked_classes": net_ack.get("classes", []),
             "device": device.name, "app": bundle_id,
         }
     except Exception as e:
@@ -382,119 +395,260 @@ _NETWORK_CAPTURE_JS = r"""
 
     var transactions = [];
     var maxTxns = 5000;
-    var bodyCache = {};
+    // Map task pointer -> txn so onEnter (request) and onLeave (response) align
+    var pending = {};
 
     function dataToStr(d) {
-        if (!d || d.isNull()) return '';
+        if (!d || (d.isNull && d.isNull())) return '';
         try {
             var ns = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4);
-            return ns ? String(ns) : '<binary ' + d.length() + ' bytes>';
-        } catch(e) { return '<binary ' + d.length() + ' bytes>'; }
+            if (ns) return String(ns);
+            return '<binary ' + d.length() + ' bytes>';
+        } catch(e) { return '<binary>'; }
     }
 
     function headersToObj(h) {
         if (!h) return {};
         var out = {};
-        var keys = h.allKeys();
-        for (var i = 0; i < keys.count(); i++) {
-            var k = String(keys.objectAtIndex_(i));
-            out[k] = String(h.objectForKey_(keys.objectAtIndex_(i)));
-        }
+        try {
+            var keys = h.allKeys();
+            for (var i = 0; i < keys.count(); i++) {
+                var k = String(keys.objectAtIndex_(i));
+                out[k] = String(h.objectForKey_(keys.objectAtIndex_(i)));
+            }
+        } catch(e) {}
         return out;
     }
 
-    // Hook dataTaskWithRequest:completionHandler:
-    ObjC.schedule(ObjC.mainQueue, function() {
-    try {
-        var m = ObjC.classes.NSURLSession['- dataTaskWithRequest:completionHandler:'];
-        if (m) {
-            Interceptor.attach(m.implementation, {
-                onEnter: function(args) {
-                    try {
-                        var req = new ObjC.Object(args[2]);
-                        var url = String(req.URL().absoluteString());
-                        var method = String(req.HTTPMethod());
-                        var body = req.HTTPBody();
-                        var txn = {
-                            url: url, method: method,
-                            headers: headersToObj(req.allHTTPHeaderFields()),
-                            req_body: body ? dataToStr(body) : '',
-                            status: -1, resp_headers: {}, resp_body: '',
-                            timestamp: Date.now()
-                        };
-                        this.txn = txn;
-                        this.completionIdx = -1;
-                        for (var i = 3; i < 8; i++) {
+    function snapshotRequest(reqObj) {
+        if (!reqObj) return null;
+        try {
+            var url = reqObj.URL();
+            var body = reqObj.HTTPBody ? reqObj.HTTPBody() : null;
+            return {
+                url: url ? String(url.absoluteString()) : '',
+                method: reqObj.HTTPMethod ? String(reqObj.HTTPMethod()) : 'GET',
+                headers: reqObj.allHTTPHeaderFields ? headersToObj(reqObj.allHTTPHeaderFields()) : {},
+                req_body: body ? dataToStr(body) : '',
+                status: -1, resp_headers: {}, resp_body: '',
+                timestamp: Date.now()
+            };
+        } catch(e) { return null; }
+    }
+
+    function pushTxn(txn) {
+        transactions.push(txn);
+        if (transactions.length > maxTxns) transactions.shift();
+    }
+
+    function completeFromTask(task, dataObj, errorObj) {
+        try {
+            var key = task.handle.toString();
+            var txn = pending[key];
+            if (!txn) {
+                var req = task.currentRequest ? task.currentRequest() : null;
+                if (!req && task.originalRequest) req = task.originalRequest();
+                txn = snapshotRequest(req) || {url: '', method: '', headers: {}, req_body: '',
+                    status: -1, resp_headers: {}, resp_body: '', timestamp: Date.now()};
+            }
+            try {
+                var resp = task.response ? task.response() : null;
+                if (resp && !resp.isNull()) {
+                    if (resp.respondsToSelector_(ObjC.selector('statusCode'))) {
+                        txn.status = resp.statusCode();
+                    }
+                    if (resp.respondsToSelector_(ObjC.selector('allHeaderFields'))) {
+                        txn.resp_headers = headersToObj(resp.allHeaderFields());
+                    }
+                }
+            } catch(e) {}
+            if (dataObj && !dataObj.isNull()) txn.resp_body = dataToStr(dataObj);
+            if (errorObj && !errorObj.isNull()) {
+                try { txn.error = String(errorObj.localizedDescription()); } catch(e) {}
+            }
+            txn.duration_ms = Date.now() - txn.timestamp;
+            pushTxn(txn);
+            delete pending[key];
+        } catch(e) {}
+    }
+
+    var hookCount = 0;
+    var hookedClasses = [];
+
+    // Hook -[NSURLSessionTask resume] on every concrete task subclass.
+    // resume() is the universal entry point for foreground, background,
+    // upload, download, websocket, and stream tasks.
+    function hookResumeOnSubclasses() {
+        try {
+            var seenImps = {};
+            var classes = ObjC.classes;
+            for (var name in classes) {
+                if (name.indexOf('SessionTask') === -1 && name.indexOf('NSURLSessionTask') === -1) continue;
+                if (name.indexOf('Task') === -1) continue;
+                try {
+                    var cls = classes[name];
+                    var sel = cls['- resume'];
+                    if (!sel) continue;
+                    var imp = sel.implementation.toString();
+                    if (seenImps[imp]) continue;
+                    seenImps[imp] = true;
+                    Interceptor.attach(sel.implementation, {
+                        onEnter: function(args) {
                             try {
-                                var arg = new ObjC.Object(args[i]);
-                                if (arg.$className && arg.$className.indexOf('Block') !== -1) {
-                                    this.completionIdx = i;
-                                    break;
+                                var task = new ObjC.Object(args[0]);
+                                var key = task.handle.toString();
+                                if (pending[key]) return;
+                                var req = null;
+                                try { req = task.currentRequest ? task.currentRequest() : null; } catch(e) {}
+                                if (!req || (req.isNull && req.isNull())) {
+                                    try { req = task.originalRequest ? task.originalRequest() : null; } catch(e) {}
                                 }
+                                var txn = snapshotRequest(req);
+                                if (txn) pending[key] = txn;
                             } catch(e) {}
                         }
-                    } catch(e) {}
-                },
-                onLeave: function(retval) {}
-            });
-        }
-    } catch(e) {}
+                    });
+                    hookCount++;
+                    hookedClasses.push(name);
+                } catch(e) {}
+            }
+        } catch(e) {}
+    }
 
-    // Hook NSURLConnection sendAsynchronousRequest for older API usage
-    try {
-        var conn = ObjC.classes.NSURLConnection['+ sendAsynchronousRequest:queue:completionHandler:'];
-        if (conn) {
-            Interceptor.attach(conn.implementation, {
-                onEnter: function(args) {
-                    try {
-                        var req = new ObjC.Object(args[2]);
-                        var url = String(req.URL().absoluteString());
-                        var method = String(req.HTTPMethod());
-                        var body = req.HTTPBody();
-                        var txn = {
-                            url: url, method: method,
-                            headers: headersToObj(req.allHTTPHeaderFields()),
-                            req_body: body ? dataToStr(body) : '',
-                            status: -1, resp_headers: {}, resp_body: '',
-                            timestamp: Date.now()
-                        };
-                        this.txn = txn;
-                    } catch(e) {}
-                }
-            });
-        }
-    } catch(e) {}
-
-    // Hook delegate: URLSession:dataTask:didReceiveResponse:completionHandler:
-    try {
-        var proto = ObjC.classes.NSURLSessionDataDelegate;
-        if (proto) {
-            var didReceiveResp = proto['- URLSession:dataTask:didReceiveResponse:completionHandler:'];
-            if (didReceiveResp) {
-                Interceptor.attach(didReceiveResp.implementation, {
+    // Hook delegate response on the canonical NSURLSessionTask base class
+    // for status / response headers when no completion block is supplied.
+    function hookTaskCompletion() {
+        try {
+            var base = ObjC.classes.NSURLSessionTask;
+            if (!base) return;
+            // -[NSURLSessionTask _onqueue_didFinishWithError:] is internal but stable.
+            // Fall back to KVO-style hook: swizzle setState:.
+            var setState = base['- setState:'];
+            if (setState) {
+                Interceptor.attach(setState.implementation, {
                     onEnter: function(args) {
+                        this.task = new ObjC.Object(args[0]);
+                        this.newState = args[2].toInt32 ? args[2].toInt32() : parseInt(args[2]);
+                    },
+                    onLeave: function(retval) {
                         try {
-                            var task = new ObjC.Object(args[4]);
-                            var resp = new ObjC.Object(args[6]);
-                            if (resp.$className && resp.$className.indexOf('HTTP') !== -1) {
-                                var url = String(task.originalRequest().URL().absoluteString());
-                                var status = resp.statusCode();
-                                var respHeaders = headersToObj(resp.allHeaderFields());
-                                transactions.push({
-                                    url: url, method: 'GET',
-                                    headers: {}, req_body: '',
-                                    status: status, resp_headers: respHeaders,
-                                    resp_body: bodyCache[url] || '',
-                                    timestamp: Date.now()
-                                });
-                                if (transactions.length > maxTxns) transactions.shift();
-                            }
+                            // NSURLSessionTaskStateCompleted = 2
+                            if (this.newState !== 2) return;
+                            var task = this.task;
+                            var data = null;
+                            try {
+                                // Many CFNetwork tasks expose -_responseData when complete
+                                if (task.respondsToSelector_(ObjC.selector('_responseData'))) {
+                                    data = task['- _responseData']();
+                                }
+                            } catch(e) {}
+                            var err = null;
+                            try {
+                                if (task.error) err = task.error();
+                            } catch(e) {}
+                            completeFromTask(task, data, err);
                         } catch(e) {}
                     }
                 });
+                hookCount++;
             }
+        } catch(e) {}
+    }
+
+    // Wrap NSURLSession completion-handler entry points so we can grab
+    // response bodies even when the app doesn't use a delegate.
+    function wrapCompletionAPI(selector) {
+        try {
+            var cls = ObjC.classes.NSURLSession;
+            var m = cls[selector];
+            if (!m) return;
+            Interceptor.attach(m.implementation, {
+                onEnter: function(args) {
+                    try {
+                        // arg2 = NSURLRequest (or NSURL), last arg = completion block
+                        var maybeReq = new ObjC.Object(args[2]);
+                        var className = maybeReq.$className || '';
+                        var req = null;
+                        if (className.indexOf('Request') !== -1) {
+                            req = maybeReq;
+                        } else if (className.indexOf('URL') !== -1) {
+                            req = ObjC.classes.NSURLRequest.requestWithURL_(maybeReq);
+                        }
+                        this.req = req;
+                        this.snapshot = snapshotRequest(req);
+                    } catch(e) {}
+                },
+                onLeave: function(retval) {
+                    try {
+                        if (!retval || retval.isNull()) return;
+                        var task = new ObjC.Object(retval);
+                        if (this.snapshot) {
+                            pending[task.handle.toString()] = this.snapshot;
+                        }
+                    } catch(e) {}
+                }
+            });
+            hookCount++;
+        } catch(e) {}
+    }
+
+    function installAll() {
+        hookResumeOnSubclasses();
+        hookTaskCompletion();
+        wrapCompletionAPI('- dataTaskWithRequest:completionHandler:');
+        wrapCompletionAPI('- dataTaskWithURL:completionHandler:');
+        wrapCompletionAPI('- uploadTaskWithRequest:fromData:completionHandler:');
+        wrapCompletionAPI('- uploadTaskWithRequest:fromFile:completionHandler:');
+        wrapCompletionAPI('- downloadTaskWithRequest:completionHandler:');
+        wrapCompletionAPI('- downloadTaskWithURL:completionHandler:');
+        wrapCompletionAPI('- dataTaskWithRequest:');
+        wrapCompletionAPI('- dataTaskWithURL:');
+
+        // Legacy NSURLConnection paths
+        try {
+            var conn = ObjC.classes.NSURLConnection;
+            if (conn) {
+                var sync = conn['+ sendSynchronousRequest:returningResponse:error:'];
+                if (sync) {
+                    Interceptor.attach(sync.implementation, {
+                        onEnter: function(args) {
+                            try { this.snap = snapshotRequest(new ObjC.Object(args[2])); } catch(e) {}
+                        },
+                        onLeave: function(retval) {
+                            try {
+                                if (!this.snap) return;
+                                if (retval && !retval.isNull()) {
+                                    this.snap.resp_body = dataToStr(new ObjC.Object(retval));
+                                }
+                                pushTxn(this.snap);
+                            } catch(e) {}
+                        }
+                    });
+                    hookCount++;
+                }
+                var async = conn['+ sendAsynchronousRequest:queue:completionHandler:'];
+                if (async) {
+                    Interceptor.attach(async.implementation, {
+                        onEnter: function(args) {
+                            try {
+                                var snap = snapshotRequest(new ObjC.Object(args[2]));
+                                if (snap) pushTxn(snap);
+                            } catch(e) {}
+                        }
+                    });
+                    hookCount++;
+                }
+            }
+        } catch(e) {}
+    }
+
+    ObjC.schedule(ObjC.mainQueue, function() {
+        try {
+            installAll();
+            send({__hook_init: true, ok: hookCount > 0, hooks: hookCount, classes: hookedClasses.slice(0, 20)});
+        } catch(e) {
+            send({__hook_init: true, ok: false, error: e.message});
         }
-    } catch(e) {}
     });
 
     rpc.exports = {
@@ -502,10 +656,11 @@ _NETWORK_CAPTURE_JS = r"""
             var c = Math.min(count || 50, transactions.length);
             return transactions.slice(-c);
         },
-        clearTransactions: function() { transactions = []; }
+        clearTransactions: function() { transactions = []; pending = {}; return true; },
+        stats: function() {
+            return {captured: transactions.length, pending: Object.keys(pending).length};
+        }
     };
-
-    send({__hook_init: true, ok: true});
 })();
 """
 
@@ -526,6 +681,8 @@ def _install_network_capture(sid, session):
         if isinstance(p, dict) and p.get("__hook_init"):
             ack["ok"] = p.get("ok", False)
             ack["error"] = p.get("error", "")
+            ack["hooks"] = p.get("hooks", 0)
+            ack["classes"] = p.get("classes", [])
             ack_event.set()
 
     for attempt in range(3):
