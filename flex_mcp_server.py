@@ -409,9 +409,36 @@ _NETWORK_CAPTURE_JS = r"""
     function dataToStr(d) {
         if (!d || (d.isNull && d.isNull())) return '';
         try {
+            var len = d.length();
+            // Detect gzip magic and try the modern decompression API.
+            // NSURLSession normally pre-decodes Content-Encoding, but some
+            // task subclasses surface the raw body to _responseData.
+            if (len >= 2) {
+                try {
+                    var bytes = d.bytes();
+                    if (bytes && !bytes.isNull()) {
+                        var b0 = Memory.readU8(bytes);
+                        var b1 = Memory.readU8(bytes.add(1));
+                        if (b0 === 0x1f && b1 === 0x8b) {
+                            try {
+                                if (d.respondsToSelector_(ObjC.selector('decompressedDataUsingAlgorithm:error:'))) {
+                                    var errPtr = Memory.alloc(Process.pointerSize);
+                                    Memory.writePointer(errPtr, NULL);
+                                    // 3 = NSDataCompressionAlgorithmZlib (handles gzip on iOS 13+)
+                                    var dec = d.decompressedDataUsingAlgorithm_error_(3, errPtr);
+                                    if (dec && !dec.isNull()) {
+                                        var ns2 = ObjC.classes.NSString.alloc().initWithData_encoding_(dec, 4);
+                                        if (ns2) return String(ns2);
+                                    }
+                                }
+                            } catch(e) {}
+                        }
+                    }
+                } catch(e) {}
+            }
             var ns = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4);
             if (ns) return String(ns);
-            return '<binary ' + d.length() + ' bytes>';
+            return '<binary ' + len + ' bytes>';
         } catch(e) { return '<binary>'; }
     }
 
@@ -645,10 +672,90 @@ _NETWORK_CAPTURE_JS = r"""
         } catch(e) {}
     }
 
+    // Accumulate response body via delegate callback. NSURLSessionDataDelegate
+    // implementations forward chunks via -URLSession:dataTask:didReceiveData:.
+    // We hook every class that implements this and append to the txn for
+    // the corresponding task pointer.
+    function hookDelegateData() {
+        try {
+            var seenImps = {};
+            var classes = ObjC.classes;
+            var sels = [
+                '- URLSession:dataTask:didReceiveData:',
+                '- URLSession:dataTask:didReceiveResponse:completionHandler:',
+                '- URLSession:task:didCompleteWithError:'
+            ];
+            for (var name in classes) {
+                var cls = classes[name];
+                for (var s = 0; s < sels.length; s++) {
+                    var selName = sels[s];
+                    try {
+                        var sel = cls[selName];
+                        if (!sel) continue;
+                        var imp = sel.implementation.toString();
+                        if (seenImps[imp]) continue;
+                        seenImps[imp] = true;
+                        if (selName === '- URLSession:dataTask:didReceiveData:') {
+                            Interceptor.attach(sel.implementation, {
+                                onEnter: function(args) {
+                                    try {
+                                        var task = new ObjC.Object(args[3]);
+                                        var data = new ObjC.Object(args[4]);
+                                        var key = task.handle.toString();
+                                        var txn = pending[key];
+                                        if (!txn) return;
+                                        if (data && !data.isNull()) {
+                                            var chunk = dataToStr(data);
+                                            if (chunk && chunk.indexOf('<binary') === -1) {
+                                                txn.resp_body = (txn.resp_body || '') + chunk;
+                                            }
+                                        }
+                                    } catch(e) {}
+                                }
+                            });
+                            hookCount++;
+                        } else if (selName === '- URLSession:dataTask:didReceiveResponse:completionHandler:') {
+                            Interceptor.attach(sel.implementation, {
+                                onEnter: function(args) {
+                                    try {
+                                        var task = new ObjC.Object(args[3]);
+                                        var resp = new ObjC.Object(args[4]);
+                                        var key = task.handle.toString();
+                                        var txn = pending[key];
+                                        if (!txn) return;
+                                        if (resp && !resp.isNull()) {
+                                            if (resp.respondsToSelector_(ObjC.selector('statusCode'))) {
+                                                txn.status = resp.statusCode();
+                                            }
+                                            if (resp.respondsToSelector_(ObjC.selector('allHeaderFields'))) {
+                                                txn.resp_headers = headersToObj(resp.allHeaderFields());
+                                            }
+                                        }
+                                    } catch(e) {}
+                                }
+                            });
+                            hookCount++;
+                        } else if (selName === '- URLSession:task:didCompleteWithError:') {
+                            Interceptor.attach(sel.implementation, {
+                                onEnter: function(args) {
+                                    try {
+                                        var task = new ObjC.Object(args[3]);
+                                        var err = (args[4] && !args[4].isNull()) ? new ObjC.Object(args[4]) : null;
+                                        completeFromTask(task, null, err);
+                                    } catch(e) {}
+                                }
+                            });
+                            hookCount++;
+                        }
+                    } catch(e) {}
+                }
+            }
+        } catch(e) {}
+    }
+
     // Last-resort completion fallback: hook -[*Task _didFinishWithError:]
-    // when present. This is the unified internal completion entry point on
-    // most CFNetwork-backed task subclasses (covers Network.framework
-    // tasks where setState: doesn't fire predictably).
+    // when present. Catches tasks whose setState: hook doesn't fire (e.g.
+    // Network.framework subclasses).
     function hookDidFinishWithError() {
         try {
             var seenImps = {};
@@ -692,6 +799,7 @@ _NETWORK_CAPTURE_JS = r"""
         hookResumeOnSubclasses();
         hookTaskCompletion();
         hookDidFinishWithError();
+        hookDelegateData();
         wrapCompletionAPI('- dataTaskWithRequest:completionHandler:');
         wrapCompletionAPI('- dataTaskWithURL:completionHandler:');
         wrapCompletionAPI('- uploadTaskWithRequest:fromData:completionHandler:');
