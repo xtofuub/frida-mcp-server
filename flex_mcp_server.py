@@ -378,12 +378,10 @@ def info(session_id: str = "") -> dict:
 _NETWORK_CAPTURE_JS = r"""
 (function(){
     if (!ObjC.available) { send({__hook_init: true, ok: false, error: 'ObjC not available'}); return; }
-    ObjC.schedule(ObjC.mainQueue, function() {
+
     var transactions = [];
     var maxTxns = 5000;
     var bodyCache = {};
-    var RESPONSE_STATUS = -1;
-    var RESPONSE_HEADERS = {};
 
     function dataToStr(d) {
         if (!d || d.isNull()) return '';
@@ -405,6 +403,7 @@ _NETWORK_CAPTURE_JS = r"""
     }
 
     // Hook dataTaskWithRequest:completionHandler:
+    ObjC.schedule(ObjC.mainQueue, function() {
     try {
         var m = ObjC.classes.NSURLSession['- dataTaskWithRequest:completionHandler:'];
         if (m) {
@@ -495,8 +494,8 @@ _NETWORK_CAPTURE_JS = r"""
             }
         }
     } catch(e) {}
-
     });
+
     rpc.exports = {
         getTransactions: function(count) {
             var c = Math.min(count || 50, transactions.length);
