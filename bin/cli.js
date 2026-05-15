@@ -12,13 +12,14 @@ const CLI_PATH = path.join(PKG_ROOT, 'bin', 'cli.js');
 const HOME = os.homedir();
 const APPDATA = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
 const XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
+const OPENCODE_CONFIG_DIR = path.join(XDG_CONFIG_HOME, 'opencode');
+const OPENCODE_LEGACY_DIR = path.join(HOME, '.opencode');
 const PYTHON = process.env.FLEX_MCP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 const SERVER_NAME = 'frida-flex';
 
 const AGENTS = {
   'Claude Code': path.join(HOME, '.claude'),
   Codex: path.join(HOME, '.codex'),
-  OpenCode: path.join(HOME, '.opencode'),
   Cursor: path.join(HOME, '.cursor'),
   Cline: path.join(HOME, '.cline'),
   'Kiro CLI': path.join(HOME, '.kiro'),
@@ -308,6 +309,28 @@ function commandExists(cmd) {
   return result.status === 0;
 }
 
+function isOpenCodeDetected() {
+  return pathExists(OPENCODE_CONFIG_DIR) || pathExists(OPENCODE_LEGACY_DIR) || commandExists('opencode');
+}
+
+function getSkillTargets() {
+  const targets = Object.entries(AGENTS)
+    .filter(([, root]) => pathExists(root))
+    .map(([agentName, root]) => ({
+      agentName,
+      skillsDir: path.join(root, 'skills'),
+    }));
+
+  if (isOpenCodeDetected()) {
+    targets.push({
+      agentName: 'OpenCode',
+      skillsDir: path.join(OPENCODE_CONFIG_DIR, 'skills'),
+    });
+  }
+
+  return targets;
+}
+
 function installSkills() {
   const skills = getSkillDirs();
   if (skills.length === 0) {
@@ -321,11 +344,8 @@ function installSkills() {
   let totalInstalled = 0;
   let totalSkipped = 0;
 
-  for (const [agentName, root] of Object.entries(AGENTS)) {
-    if (!fs.existsSync(root)) continue;
+  for (const { agentName, skillsDir } of getSkillTargets()) {
     touchedAgents += 1;
-
-    const skillsDir = path.join(root, 'skills');
     if (!dryRun) fs.mkdirSync(skillsDir, { recursive: true });
 
     let installed = 0;
@@ -389,14 +409,18 @@ function getConfigTargets() {
     });
   }
 
-  if (pathExists(AGENTS.OpenCode)) {
+  if (isOpenCodeDetected()) {
     const existingOpenCodePaths = [
+      path.join(OPENCODE_CONFIG_DIR, 'opencode.json'),
+      path.join(OPENCODE_CONFIG_DIR, 'opencode.jsonc'),
       path.join(XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc'),
+      path.join(APPDATA, 'opencode', 'opencode.json'),
       path.join(APPDATA, 'opencode', 'opencode.jsonc'),
-      path.join(AGENTS.OpenCode, 'opencode.jsonc'),
-      path.join(AGENTS.OpenCode, 'config.jsonc'),
+      path.join(OPENCODE_LEGACY_DIR, 'opencode.json'),
+      path.join(OPENCODE_LEGACY_DIR, 'opencode.jsonc'),
+      path.join(OPENCODE_LEGACY_DIR, 'config.jsonc'),
     ].filter(pathExists);
-    const openCodePath = existingOpenCodePaths[0] || path.join(XDG_CONFIG_HOME, 'opencode', 'opencode.jsonc');
+    const openCodePath = existingOpenCodePaths[0] || path.join(OPENCODE_CONFIG_DIR, 'opencode.json');
     targets.push({
       name: 'OpenCode',
       filePath: openCodePath,

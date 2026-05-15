@@ -24,7 +24,7 @@ Use one of these when you want to force setup for a specific agent, even on a fr
 | --- | --- |
 | Claude Code | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install --claude-code` |
 | Claude Desktop | `mkdir -p "$HOME/Library/Application Support/Claude" && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
-| OpenCode | `mkdir -p ~/.opencode && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+| OpenCode | `mkdir -p ~/.config/opencode && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
 | Cursor | `mkdir -p ~/.cursor && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
 | Codex | `mkdir -p ~/.codex && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
 
@@ -41,7 +41,7 @@ Windows PowerShell presets:
 New-Item -ItemType Directory -Force "$env:APPDATA\Claude"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # OpenCode
-New-Item -ItemType Directory -Force "$HOME\.opencode"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
+New-Item -ItemType Directory -Force "$HOME\.config\opencode"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # Cursor
 New-Item -ItemType Directory -Force "$HOME\.cursor"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
@@ -152,7 +152,7 @@ The installer updates the clients it can detect on the current machine:
 | Claude Code | Runs `claude mcp add frida-flex flex-mcp-server serve` if the `claude` CLI is available. |
 | Claude Desktop | Updates `claude_desktop_config.json` when the Claude config directory exists. |
 | Cursor | Updates `~/.cursor/mcp.json` when `~/.cursor` exists. |
-| OpenCode | Updates or creates `opencode.jsonc` when `~/.opencode` exists. |
+| OpenCode | Updates or creates `~/.config/opencode/opencode.json` when `opencode` is on PATH or an OpenCode config directory exists. Skills install to `~/.config/opencode/skills/`. |
 | Codex | Updates `~/.codex/config.toml` when `~/.codex` exists. |
 
 Existing config files get a timestamped `.bak-*` backup before they are changed. Unsupported clients still get the bundled skill when their skill directory is detected, but their MCP config may need manual setup.
