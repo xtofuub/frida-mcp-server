@@ -395,6 +395,9 @@ _NETWORK_CAPTURE_JS = r"""
 
     var transactions = [];
     var maxTxns = 5000;
+    // WebSocket frames: {url, dir: 'send'|'recv', text|data_hex, time}
+    var wsFrames = [];
+    var wsMax = 2000;
     // Map task pointer -> txn so onEnter (request) and onLeave (response) align
     var pending = {};
 
@@ -604,6 +607,65 @@ _NETWORK_CAPTURE_JS = r"""
         wrapCompletionAPI('- dataTaskWithRequest:');
         wrapCompletionAPI('- dataTaskWithURL:');
 
+        // WebSocket frame capture (iOS 13+).
+        try {
+            var wsCls = ObjC.classes.NSURLSessionWebSocketTask;
+            if (wsCls) {
+                function wsUrl(task) {
+                    try {
+                        var req = task.currentRequest ? task.currentRequest() : null;
+                        if (!req && task.originalRequest) req = task.originalRequest();
+                        if (req && req.URL) return String(req.URL().absoluteString());
+                    } catch(e) {}
+                    return '';
+                }
+                function wsPushFrame(f) {
+                    wsFrames.push(f);
+                    if (wsFrames.length > wsMax) wsFrames.shift();
+                }
+                function readMessage(msgPtr, dir, url) {
+                    try {
+                        var m = new ObjC.Object(msgPtr);
+                        var t = m.type ? m.type() : 0; // 0=data, 1=string
+                        var f = {url: url, dir: dir, time: Date.now()};
+                        if (t === 1 && m.string) {
+                            var s = m.string();
+                            f.text = s ? String(s) : '';
+                        } else if (m.data) {
+                            var d = m.data();
+                            if (d && !d.isNull()) {
+                                f.size = d.length();
+                                var s2 = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4);
+                                if (s2) f.text = String(s2);
+                            }
+                        }
+                        wsPushFrame(f);
+                    } catch(e) {}
+                }
+                var sendSel = wsCls['- sendMessage:completionHandler:'];
+                if (sendSel) {
+                    Interceptor.attach(sendSel.implementation, {
+                        onEnter: function(args) {
+                            try {
+                                var task = new ObjC.Object(args[0]);
+                                readMessage(args[2], 'send', wsUrl(task));
+                            } catch(e) {}
+                        }
+                    });
+                    hookCount++;
+                }
+                var recvSel = wsCls['- receiveMessageWithCompletionHandler:'];
+                if (recvSel) {
+                    Interceptor.attach(recvSel.implementation, {
+                        onEnter: function(args) {
+                            try { this.task = new ObjC.Object(args[0]); } catch(e) {}
+                        }
+                    });
+                    hookCount++;
+                }
+            }
+        } catch(e) {}
+
         // Legacy NSURLConnection paths
         try {
             var conn = ObjC.classes.NSURLConnection;
@@ -657,8 +719,17 @@ _NETWORK_CAPTURE_JS = r"""
             return transactions.slice(-c);
         },
         clearTransactions: function() { transactions = []; pending = {}; return true; },
+        getWsFrames: function(count) {
+            var c = Math.min(count || 100, wsFrames.length);
+            return wsFrames.slice(-c);
+        },
+        clearWsFrames: function() { wsFrames = []; return true; },
         stats: function() {
-            return {captured: transactions.length, pending: Object.keys(pending).length};
+            return {
+                captured: transactions.length,
+                pending: Object.keys(pending).length,
+                ws_frames: wsFrames.length
+            };
         }
     };
 })();
@@ -832,57 +903,345 @@ def search(keyword: str, search_bodies: bool = False, session_id: str = "") -> d
 
 # ── Request replay ──────────────────────────────────────────────────────
 
+
+def _get_captured_txn(sid, idx):
+    """Fetch a captured transaction by index. Returns (txn_dict, error_str)."""
+    state = _intercept_rules.get(sid, {})
+    net_script = state.get("net_script")
+    if not net_script:
+        return None, "Network capture not active. Re-connect."
+    txns = net_script.exports_sync.get_transactions(max(idx + 1, 1))
+    if idx < 0 or idx >= len(txns):
+        return None, f"Index {idx} out of range (have {len(txns)})"
+    return txns[idx], None
+
+
+def _build_replay_js(method, url, headers, body, timeout_sec):
+    """Generate an NSURLSession replay snippet that sends the request and posts
+    a {__done: true, result: <json>} message on completion. Shared by replay,
+    replay_as, and race."""
+    method_j = json.dumps(method or "GET")
+    url_j = json.dumps(url or "")
+    headers_j = json.dumps(headers or {})
+    body_j = json.dumps(body or "")
+    return "\n".join([
+        "(function(){ try {",
+        "var result = {}; var sem = ObjC.classes.dispatch_semaphore_create(0);",
+        "var reqUrl = " + url_j + ";",
+        "var reqMethod = " + method_j + ";",
+        "var reqHeaders = " + headers_j + ";",
+        "var reqBody = " + body_j + ";",
+        "if (!reqUrl) { send({__done: true, result: JSON.stringify({error:'url required'})}); return; }",
+        "var t0 = Date.now();",
+        "var nsurl = ObjC.classes.NSURL.URLWithString_(reqUrl);",
+        "var request = ObjC.classes.NSMutableURLRequest.requestWithURL_(nsurl);",
+        "request.setHTTPMethod_(reqMethod);",
+        "for (var k in reqHeaders) { request.setValue_forHTTPHeaderField_(reqHeaders[k], k); }",
+        "if (reqBody) { var bd = ObjC.classes.NSString.stringWithString_(reqBody).dataUsingEncoding_(4); request.setHTTPBody_(bd); }",
+        "var session = ObjC.classes.NSURLSession.sharedSession();",
+        "session.dataTaskWithRequest_completionHandler_(request, function(data, response, error) {",
+        "try { if (response && !response.isNull()) { var resp = new ObjC.Object(response); result.status = resp.statusCode(); var ah = resp.allHeaderFields(); if (ah) { result.headers = {}; var keys = ah.allKeys(); for (var i = 0; i < keys.count(); i++) { result.headers[String(keys.objectAtIndex_(i))] = String(ah.objectForKey_(keys.objectAtIndex_(i))); } } } } catch(e) {}",
+        "try { if (data && !data.isNull()) { var d = new ObjC.Object(data); var s = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4); result.body = s ? String(s) : '<binary>'; result.body_size = d.length(); } } catch(e) {}",
+        "try { if (error && !error.isNull()) { result.error = String(new ObjC.Object(error)); } } catch(e) {}",
+        "result.duration_ms = Date.now() - t0;",
+        "ObjC.classes.dispatch_semaphore_signal(sem);",
+        "}).resume();",
+        "ObjC.classes.dispatch_semaphore_wait(sem, " + str(int(timeout_sec * 1000000000)) + ");",
+        "send({__done: true, result: JSON.stringify(result)});",
+        "} catch(e) { send({__done: true, result: JSON.stringify({error: e.message})}); }",
+        "})();",
+    ])
+
+
+def _run_replay(session, method, url, headers, body, timeout_sec):
+    """Execute a single replay and return parsed result dict."""
+    js = _build_replay_js(method, url, headers, body, timeout_sec)
+    out = exec_js_stream(session, js, timeout=timeout_sec + 10)
+    if out["error"]:
+        return {"error": out["error"]}
+    info = out.get("info", {})
+    if not info.get("result"):
+        return {"error": "no response"}
+    try:
+        return json.loads(info["result"])
+    except Exception:
+        return {"raw": info["result"]}
+
+
 @mcp.tool()
 def replay(
     index: int = -1, method: str = "", url: str = "",
     headers: dict = None, body: str = "", timeout: int = 30, session_id: str = "",
 ) -> dict:
-    """Replay a captured request, optionally overriding fields."""
+    """Replay a captured request, optionally overriding fields.
+
+    If index >= 0, the captured request is loaded as a base and any explicit
+    method/url/headers/body arguments override its values.
+    """
     try:
-        _, session = _get_session(session_id)
+        sid, session = _get_session(session_id)
         idx = int(index)
-        method_j = json.dumps(method or "")
-        url_j = json.dumps(url or "")
-        headers_j = json.dumps(headers or {})
-        body_j = json.dumps(body or "")
-        # Build JS inline to avoid f-string issues
-        parts = [
+        base = {"method": "", "url": "", "headers": {}, "body": ""}
+        if idx >= 0:
+            txn, err = _get_captured_txn(sid, idx)
+            if err:
+                return {"success": False, "error": err}
+            base["method"] = txn.get("method", "GET")
+            base["url"] = txn.get("url", "")
+            base["headers"] = txn.get("headers", {}) or {}
+            base["body"] = txn.get("req_body", "") or ""
+        eff_method = method or base["method"] or "GET"
+        eff_url = url or base["url"]
+        eff_headers = dict(base["headers"])
+        if headers:
+            eff_headers.update(headers)
+        eff_body = body if body else base["body"]
+        if not eff_url:
+            return {"success": False, "error": "url required (pass index to load a captured request, or url=...)"}
+        result = _run_replay(session, eff_method, eff_url, eff_headers, eff_body, timeout)
+        if "error" in result and len(result) == 1:
+            return {"success": False, "error": result["error"]}
+        return {"success": True, **result}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def replay_as(
+    index: int, auth: str = "", cookie: str = "",
+    extra_headers: dict = None, timeout: int = 30, session_id: str = "",
+) -> dict:
+    """Replay a captured request with swapped credentials.
+
+    Use for IDOR / BOLA testing: replay user A's request as user B by
+    overriding Authorization and / or Cookie. Other headers and the body
+    are preserved verbatim.
+
+    Args:
+        index: Index of the captured request to base the replay on.
+        auth: Replacement value for the Authorization header (e.g. "Bearer <token>").
+        cookie: Replacement value for the Cookie header.
+        extra_headers: Additional headers to set or override.
+    """
+    try:
+        sid, session = _get_session(session_id)
+        idx = int(index)
+        txn, err = _get_captured_txn(sid, idx)
+        if err:
+            return {"success": False, "error": err}
+        method = txn.get("method", "GET")
+        url = txn.get("url", "")
+        headers = dict(txn.get("headers", {}) or {})
+        body = txn.get("req_body", "") or ""
+        # Case-insensitive override of Authorization / Cookie.
+        if auth:
+            for k in list(headers.keys()):
+                if k.lower() == "authorization":
+                    del headers[k]
+            headers["Authorization"] = auth
+        if cookie:
+            for k in list(headers.keys()):
+                if k.lower() == "cookie":
+                    del headers[k]
+            headers["Cookie"] = cookie
+        if extra_headers:
+            headers.update(extra_headers)
+        result = _run_replay(session, method, url, headers, body, timeout)
+        if "error" in result and len(result) == 1:
+            return {"success": False, "error": result["error"]}
+        return {
+            "success": True,
+            "original": {"method": method, "url": url, "status": txn.get("status", -1)},
+            "replay": result,
+            "swapped": {
+                "authorization": bool(auth),
+                "cookie": bool(cookie),
+                "extra_headers": list((extra_headers or {}).keys()),
+            },
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def race(
+    index: int, n: int = 10, delay_ms: int = 0,
+    timeout: int = 30, session_id: str = "",
+) -> dict:
+    """Fire N concurrent replays of a captured request.
+
+    Useful for business-logic abuse where the same operation should only
+    succeed once (coupon redemption, account creation, double-spend, etc.).
+    Sends all N requests from a single Frida script with a tight loop and
+    a shared semaphore, then summarizes the resulting status codes.
+
+    Args:
+        index: Captured request to race.
+        n: Number of concurrent requests (capped at 50).
+        delay_ms: Optional stagger between launches in milliseconds.
+    """
+    try:
+        sid, session = _get_session(session_id)
+        idx = int(index)
+        txn, err = _get_captured_txn(sid, idx)
+        if err:
+            return {"success": False, "error": err}
+        n = max(1, min(int(n), 50))
+        delay_ms = max(0, int(delay_ms))
+        method = txn.get("method", "GET")
+        url = txn.get("url", "")
+        headers = txn.get("headers", {}) or {}
+        body = txn.get("req_body", "") or ""
+        if not url:
+            return {"success": False, "error": "captured request has no url"}
+        method_j = json.dumps(method)
+        url_j = json.dumps(url)
+        headers_j = json.dumps(headers)
+        body_j = json.dumps(body)
+        per_timeout_ns = int(timeout * 1_000_000_000)
+        js = "\n".join([
             "(function(){ try {",
-            "var result = {}; var sem = ObjC.classes.dispatch_semaphore_create(0);",
+            "var N = " + str(n) + ";",
+            "var DELAY = " + str(delay_ms) + ";",
             "var reqUrl = " + url_j + ";",
-            "var reqMethod = " + method_j + " || 'GET';",
+            "var reqMethod = " + method_j + ";",
             "var reqHeaders = " + headers_j + ";",
             "var reqBody = " + body_j + ";",
-            "if (!reqUrl) { send({__error: 'url required'}); send({__done: true}); return; }",
-            "var nsurl = ObjC.classes.NSURL.URLWithString_(reqUrl);",
-            "var request = ObjC.classes.NSMutableURLRequest.requestWithURL_(nsurl);",
-            "request.setHTTPMethod_(reqMethod);",
-            "for (var k in reqHeaders) { request.setValue_forHTTPHeaderField_(reqHeaders[k], k); }",
-            "if (reqBody) { var bd = ObjC.classes.NSString.stringWithString_(reqBody).dataUsingEncoding_(4); request.setHTTPBody_(bd); }",
-            "var session = ObjC.classes.NSURLSession.sharedSession();",
-            "session.dataTaskWithRequest_completionHandler_(request, function(data, response, error) {",
-            "try { if (response) { var resp = new ObjC.Object(response); result.status = resp.statusCode(); var ah = resp.allHeaderFields(); if (ah) { result.headers = {}; var keys = ah.allKeys(); for (var i = 0; i < keys.count(); i++) { result.headers[String(keys.objectAtIndex_(i))] = String(ah.objectForKey_(keys.objectAtIndex_(i))); } } } } catch(e) {}",
-            "try { if (data) { var d = new ObjC.Object(data); var s = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4); result.body = s ? String(s) : '<binary>'; result.body_size = d.length(); } } catch(e) {}",
-            "try { if (error) { result.error = String(new ObjC.Object(error)); } } catch(e) {}",
-            "ObjC.classes.dispatch_semaphore_signal(sem);",
-            "}).resume();",
-            "ObjC.classes.dispatch_semaphore_wait(sem, " + str(int(timeout * 1000000000)) + ");",
-            "send({__done: true, result: JSON.stringify(result)});",
-            "} catch(e) { send({__error: e.message}); send({__done: true}); }",
+            "var results = new Array(N);",
+            "var done = 0;",
+            "var sem = ObjC.classes.dispatch_semaphore_create(0);",
+            "function launch(i) {",
+            "  var t0 = Date.now();",
+            "  var nsurl = ObjC.classes.NSURL.URLWithString_(reqUrl);",
+            "  var request = ObjC.classes.NSMutableURLRequest.requestWithURL_(nsurl);",
+            "  request.setHTTPMethod_(reqMethod);",
+            "  for (var k in reqHeaders) { request.setValue_forHTTPHeaderField_(reqHeaders[k], k); }",
+            "  if (reqBody) { var bd = ObjC.classes.NSString.stringWithString_(reqBody).dataUsingEncoding_(4); request.setHTTPBody_(bd); }",
+            "  ObjC.classes.NSURLSession.sharedSession().dataTaskWithRequest_completionHandler_(request, function(data, response, error) {",
+            "    var r = {i: i, status: -1, duration_ms: Date.now() - t0};",
+            "    try { if (response && !response.isNull()) r.status = (new ObjC.Object(response)).statusCode(); } catch(e) {}",
+            "    try { if (data && !data.isNull()) { var d = new ObjC.Object(data); r.body_size = d.length(); var s = ObjC.classes.NSString.alloc().initWithData_encoding_(d, 4); if (s) r.body_preview = String(s).substring(0, 200); } } catch(e) {}",
+            "    try { if (error && !error.isNull()) r.error = String(new ObjC.Object(error)); } catch(e) {}",
+            "    results[i] = r;",
+            "    done++;",
+            "    if (done === N) ObjC.classes.dispatch_semaphore_signal(sem);",
+            "  }).resume();",
+            "}",
+            "for (var i = 0; i < N; i++) {",
+            "  launch(i);",
+            "  if (DELAY > 0 && i < N - 1) {",
+            "    var until = Date.now() + DELAY;",
+            "    while (Date.now() < until) {}",
+            "  }",
+            "}",
+            "ObjC.classes.dispatch_semaphore_wait(sem, " + str(per_timeout_ns) + ");",
+            "send({__done: true, result: JSON.stringify(results)});",
+            "} catch(e) { send({__done: true, result: JSON.stringify({error: e.message})}); }",
             "})();",
-        ]
-        js = "\n".join(parts)
-        result = exec_js_stream(session, js, timeout=timeout + 10)
-        if result["error"]:
-            return {"success": False, "error": result["error"]}
-        info = result.get("info", {})
-        if info.get("result"):
-            try:
-                data = json.loads(info["result"])
-                return {"success": True, **data}
-            except Exception:
-                return {"success": True, "raw": info["result"]}
-        return {"success": False, "error": "no response"}
+        ])
+        out = exec_js_stream(session, js, timeout=timeout + 15)
+        if out["error"]:
+            return {"success": False, "error": out["error"]}
+        info = out.get("info", {})
+        if not info.get("result"):
+            return {"success": False, "error": "no response"}
+        try:
+            results = json.loads(info["result"])
+        except Exception:
+            return {"success": False, "error": "parse: " + info["result"][:200]}
+        if isinstance(results, dict) and "error" in results:
+            return {"success": False, "error": results["error"]}
+        # Summarize.
+        by_status = {}
+        for r in results:
+            if not r:
+                continue
+            s = str(r.get("status", -1))
+            by_status[s] = by_status.get(s, 0) + 1
+        return {
+            "success": True,
+            "fired": len(results),
+            "by_status": by_status,
+            "results": results,
+            "request": {"method": method, "url": url},
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def _diff_dict(a, b):
+    """Return added/removed/changed keys between two dicts (case-insensitive)."""
+    al = {k.lower(): (k, v) for k, v in (a or {}).items()}
+    bl = {k.lower(): (k, v) for k, v in (b or {}).items()}
+    added, removed, changed = {}, {}, {}
+    for k in bl:
+        if k not in al:
+            added[bl[k][0]] = bl[k][1]
+        elif al[k][1] != bl[k][1]:
+            changed[bl[k][0]] = {"a": al[k][1], "b": bl[k][1]}
+    for k in al:
+        if k not in bl:
+            removed[al[k][0]] = al[k][1]
+    return {"added": added, "removed": removed, "changed": changed}
+
+
+def _diff_body(a, b):
+    """JSON-aware body diff. Falls back to a unified-style line summary."""
+    a = a or ""
+    b = b or ""
+    if a == b:
+        return {"equal": True}
+    # Try JSON.
+    try:
+        ja = json.loads(a) if a else None
+        jb = json.loads(b) if b else None
+        if isinstance(ja, dict) and isinstance(jb, dict):
+            return {"equal": False, "json": _diff_dict(ja, jb)}
+    except Exception:
+        pass
+    # Line diff (truncated).
+    al = a.splitlines()
+    bl = b.splitlines()
+    only_a = [l for l in al if l not in bl][:30]
+    only_b = [l for l in bl if l not in al][:30]
+    return {
+        "equal": False,
+        "size_a": len(a),
+        "size_b": len(b),
+        "only_in_a": only_a,
+        "only_in_b": only_b,
+    }
+
+
+@mcp.tool()
+def diff(a_index: int, b_index: int, session_id: str = "") -> dict:
+    """Diff two captured transactions.
+
+    Compares status, headers (added/removed/changed), and body (JSON-aware
+    when both sides parse). Useful for one-call IDOR / BOLA confirmation:
+    replay as a different identity, then diff the captured pair.
+    """
+    try:
+        sid, _ = _get_session(session_id)
+        ai, bi = int(a_index), int(b_index)
+        a, err = _get_captured_txn(sid, ai)
+        if err:
+            return {"success": False, "error": "a: " + err}
+        b, err = _get_captured_txn(sid, bi)
+        if err:
+            return {"success": False, "error": "b: " + err}
+        return {
+            "success": True,
+            "a": {"index": ai, "method": a.get("method"), "url": a.get("url"), "status": a.get("status")},
+            "b": {"index": bi, "method": b.get("method"), "url": b.get("url"), "status": b.get("status")},
+            "status_changed": a.get("status") != b.get("status"),
+            "url_changed": a.get("url") != b.get("url"),
+            "method_changed": a.get("method") != b.get("method"),
+            "request_headers": _diff_dict(a.get("headers", {}), b.get("headers", {})),
+            "response_headers": _diff_dict(a.get("resp_headers", {}), b.get("resp_headers", {})),
+            "request_body": _diff_body(a.get("req_body", ""), b.get("req_body", "")),
+            "response_body": _diff_body(a.get("resp_body", ""), b.get("resp_body", "")),
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -2431,6 +2790,488 @@ def trace_stop(hook_id: str = "", session_id: str = "") -> dict:
         return {"success": True, "stopped": stopped}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+# ── WebSocket frames ────────────────────────────────────────────────────
+
+@mcp.tool()
+def ws_frames(count: int = 100, clear: bool = False, session_id: str = "") -> dict:
+    """List captured WebSocket frames (NSURLSessionWebSocketTask).
+
+    Captures send / receive payloads. Hooks are installed automatically by
+    connect; iOS 13+ targets only.
+    """
+    try:
+        sid, _ = _get_session(session_id)
+        net_script = _intercept_rules.get(sid, {}).get("net_script")
+        if not net_script:
+            return {"success": False, "error": "Network capture not active. Re-connect."}
+        frames = net_script.exports_sync.get_ws_frames(int(count))
+        if clear:
+            try: net_script.exports_sync.clear_ws_frames()
+            except Exception: pass
+        return {"success": True, "count": len(frames), "frames": frames}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── WebViews ────────────────────────────────────────────────────────────
+
+_WEBVIEWS_JS = r"""(function(){try{
+    var out = [];
+    var seen = {};
+    function pushView(v, kind) {
+        try {
+            var addr = v.handle.toString();
+            if (seen[addr]) return;
+            seen[addr] = true;
+            var url = '';
+            try { var u = v.URL ? v.URL() : null; if (u && !u.isNull()) url = String(u.absoluteString()); } catch(e) {}
+            if (!url) { try { var r = v.request ? v.request() : null; if (r && !r.isNull()) url = String(r.URL().absoluteString()); } catch(e) {} }
+            var title = '';
+            try { var t = v.title ? v.title() : null; if (t) title = String(t); } catch(e) {}
+            out.push({addr: addr, kind: kind, class: v.$className, url: url, title: title});
+        } catch(e) {}
+    }
+    ObjC.choose(ObjC.classes.WKWebView, {
+        onMatch: function(v) { pushView(v, 'WKWebView'); },
+        onComplete: function() {}
+    });
+    if (ObjC.classes.UIWebView) {
+        try {
+            ObjC.choose(ObjC.classes.UIWebView, {
+                onMatch: function(v) { pushView(v, 'UIWebView'); },
+                onComplete: function() {}
+            });
+        } catch(e) {}
+    }
+    return JSON.stringify(out);
+}catch(e){return JSON.stringify({error: e.message});}})()"""
+
+
+@mcp.tool()
+def webviews(session_id: str = "") -> dict:
+    """List live WKWebView / UIWebView instances with their current URL and title."""
+    try:
+        _, session = _get_session(session_id)
+        r = exec_js(session, _WEBVIEWS_JS, timeout=20)
+        if not r.get("ok"):
+            return {"success": False, "error": str(r)}
+        try:
+            data = json.loads(r["result"])
+        except Exception:
+            return {"success": False, "error": "parse: " + str(r["result"])[:200]}
+        if isinstance(data, dict) and "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, "count": len(data), "webviews": data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def webview_eval(js: str, address: str = "", session_id: str = "") -> dict:
+    """Evaluate JavaScript inside a WKWebView via evaluateJavaScript:completionHandler:.
+
+    If address is empty, the first discovered WKWebView is used. Returns the
+    string representation of the JS result (or the NSError description).
+    """
+    try:
+        _, session = _get_session(session_id)
+        addr_j = json.dumps(address or "")
+        js_j = json.dumps(js)
+        wrapper = (
+            "(function(){ try {"
+            "var addr = " + addr_j + ";"
+            "var target = null;"
+            "if (addr) { try { target = new ObjC.Object(ptr(addr)); } catch(e) { send({__done:true, result: JSON.stringify({error:'bad address: ' + e.message})}); return; } }"
+            "if (!target) {"
+            "  ObjC.choose(ObjC.classes.WKWebView, { onMatch: function(v){ if (!target) target = v; }, onComplete: function(){} });"
+            "}"
+            "if (!target) { send({__done:true, result: JSON.stringify({error:'no WKWebView found'})}); return; }"
+            "var sem = ObjC.classes.dispatch_semaphore_create(0);"
+            "var out = {result: null, error: null};"
+            "ObjC.schedule(ObjC.mainQueue, function(){"
+            "  try {"
+            "    target.evaluateJavaScript_completionHandler_(" + js_j + ", function(res, err) {"
+            "      try { if (res && !res.isNull()) out.result = String(new ObjC.Object(res)); } catch(e) {}"
+            "      try { if (err && !err.isNull()) out.error = String((new ObjC.Object(err)).localizedDescription()); } catch(e) {}"
+            "      ObjC.classes.dispatch_semaphore_signal(sem);"
+            "    });"
+            "  } catch(e) { out.error = e.message; ObjC.classes.dispatch_semaphore_signal(sem); }"
+            "});"
+            "ObjC.classes.dispatch_semaphore_wait(sem, " + str(20 * 1_000_000_000) + ");"
+            "send({__done:true, result: JSON.stringify(out)});"
+            "} catch(e) { send({__done:true, result: JSON.stringify({error: e.message})}); } })();"
+        )
+        out = exec_js_stream(session, wrapper, timeout=30)
+        if out["error"]:
+            return {"success": False, "error": out["error"]}
+        info = out.get("info", {})
+        if not info.get("result"):
+            return {"success": False, "error": "no response"}
+        try:
+            data = json.loads(info["result"])
+        except Exception:
+            return {"success": False, "error": "parse"}
+        if data.get("error"):
+            return {"success": False, "error": data["error"]}
+        return {"success": True, "result": data.get("result")}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def jsbridge(session_id: str = "") -> dict:
+    """Enumerate WKScriptMessageHandler channels and JSContext exports.
+
+    Lists message handler names registered on any WKWebView's user content
+    controller, plus the keys exported on every live JSContext. These are
+    common native-bridge auth bypass surfaces.
+    """
+    try:
+        _, session = _get_session(session_id)
+        js = r"""(function(){try{
+            var bridges = [];
+            var contexts = [];
+            ObjC.choose(ObjC.classes.WKWebView, {
+                onMatch: function(v) {
+                    try {
+                        var cfg = v.configuration ? v.configuration() : null;
+                        var ucc = cfg ? cfg.userContentController() : null;
+                        if (!ucc) return;
+                        var handlers = ucc.valueForKey_('_userScriptMessageHandlers') || ucc.valueForKey_('userScriptMessageHandlers');
+                        var entry = {webview: v.handle.toString(), handlers: [], scripts: []};
+                        if (handlers) {
+                            try {
+                                var keys = handlers.allKeys ? handlers.allKeys() : null;
+                                if (keys) for (var i = 0; i < keys.count(); i++) entry.handlers.push(String(keys.objectAtIndex_(i)));
+                            } catch(e) {}
+                        }
+                        try {
+                            var scripts = ucc.userScripts();
+                            if (scripts) {
+                                for (var j = 0; j < scripts.count(); j++) {
+                                    var s = scripts.objectAtIndex_(j);
+                                    var src = s.source ? String(s.source()) : '';
+                                    entry.scripts.push(src.substring(0, 200));
+                                }
+                            }
+                        } catch(e) {}
+                        bridges.push(entry);
+                    } catch(e) {}
+                },
+                onComplete: function(){}
+            });
+            try {
+                ObjC.choose(ObjC.classes.JSContext, {
+                    onMatch: function(c) {
+                        try {
+                            var keys = [];
+                            var globalObj = c.globalObject();
+                            if (globalObj) {
+                                var props = globalObj.toDictionary ? globalObj.toDictionary() : null;
+                                if (props) {
+                                    var ks = props.allKeys();
+                                    for (var i = 0; i < Math.min(ks.count(), 50); i++) keys.push(String(ks.objectAtIndex_(i)));
+                                }
+                            }
+                            contexts.push({addr: c.handle.toString(), keys: keys});
+                        } catch(e) {}
+                    },
+                    onComplete: function(){}
+                });
+            } catch(e) {}
+            return JSON.stringify({bridges: bridges, contexts: contexts});
+        }catch(e){return JSON.stringify({error: e.message});}})()"""
+        r = exec_js(session, js, timeout=20)
+        if not r.get("ok"):
+            return {"success": False, "error": str(r)}
+        try:
+            data = json.loads(r["result"])
+        except Exception:
+            return {"success": False, "error": "parse"}
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, **data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Swift runtime ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def swift_modules(session_id: str = "") -> dict:
+    """List Swift modules visible to Frida (Swift.available required)."""
+    try:
+        _, session = _get_session(session_id)
+        r = exec_js(session,
+            "(function(){ if (typeof Swift === 'undefined' || !Swift.available) return JSON.stringify({error:'Swift runtime not available'}); var mods = Object.keys(Swift.modules || {}); return JSON.stringify({modules: mods}); })()",
+            timeout=15)
+        if not r.get("ok"):
+            return {"success": False, "error": str(r)}
+        data = json.loads(r["result"])
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, **data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def swift_classes(search: str = "", module: str = "", limit: int = 100, session_id: str = "") -> dict:
+    """Search Swift classes (optionally filtered by module name)."""
+    try:
+        _, session = _get_session(session_id)
+        sj = json.dumps(search or "")
+        mj = json.dumps(module or "")
+        lj = str(int(limit))
+        js = (
+            "(function(){ if (typeof Swift === 'undefined' || !Swift.available) return JSON.stringify({error:'Swift runtime not available'}); "
+            "var s = " + sj + "; var mod = " + mj + "; var lim = " + lj + "; var out = []; "
+            "var modules = Swift.modules || {}; "
+            "for (var name in modules) { if (mod && name.indexOf(mod) === -1) continue; "
+            "  var m = modules[name]; if (!m || !m.classes) continue; "
+            "  for (var cn in m.classes) { if (s && cn.toLowerCase().indexOf(s.toLowerCase()) === -1) continue; "
+            "    out.push({module: name, name: cn}); if (out.length >= lim) return JSON.stringify({classes: out, truncated: true}); } } "
+            "return JSON.stringify({classes: out, truncated: false}); })()"
+        )
+        r = exec_js(session, js, timeout=20)
+        if not r.get("ok"):
+            return {"success": False, "error": str(r)}
+        data = json.loads(r["result"])
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, **data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def swift_methods(class_name: str, module: str = "", session_id: str = "") -> dict:
+    """List methods of a Swift class. Pass module for disambiguation."""
+    try:
+        _, session = _get_session(session_id)
+        cn = json.dumps(class_name)
+        mj = json.dumps(module or "")
+        js = (
+            "(function(){ if (typeof Swift === 'undefined' || !Swift.available) return JSON.stringify({error:'Swift runtime not available'}); "
+            "var name = " + cn + "; var mod = " + mj + "; var found = null; var foundMod = null; "
+            "var modules = Swift.modules || {}; "
+            "for (var mn in modules) { if (mod && mn !== mod) continue; var m = modules[mn]; if (!m || !m.classes) continue; "
+            "  if (m.classes[name]) { found = m.classes[name]; foundMod = mn; break; } } "
+            "if (!found) return JSON.stringify({error: 'class not found'}); "
+            "var methods = []; try { for (var k in found.methods || {}) methods.push(k); } catch(e) {} "
+            "var fields = []; try { for (var k2 in found.fields || {}) fields.push(k2); } catch(e) {} "
+            "return JSON.stringify({module: foundMod, class: name, methods: methods, fields: fields}); })()"
+        )
+        r = exec_js(session, js, timeout=20)
+        if not r.get("ok"):
+            return {"success": False, "error": str(r)}
+        data = json.loads(r["result"])
+        if "error" in data:
+            return {"success": False, "error": data["error"]}
+        return {"success": True, **data}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── File push (host -> device) ──────────────────────────────────────────
+
+@mcp.tool()
+def push(local_path: str, device_path: str, session_id: str = "") -> dict:
+    """Upload a file from the host to the device sandbox.
+
+    Streams the local file in base64 chunks and writes it on the device via
+    NSData writeToFile:atomically:. Existing files at device_path are
+    overwritten.
+    """
+    try:
+        _, session = _get_session(session_id)
+        if not os.path.isfile(local_path):
+            return {"success": False, "error": "local file not found: " + local_path}
+        size = os.path.getsize(local_path)
+        with open(local_path, "rb") as f:
+            raw = f.read()
+        b64 = base64.b64encode(raw).decode("ascii")
+        # Chunk at 256 KB of base64 to keep RPC payloads sane.
+        chunk_size = 256 * 1024
+        chunks = [b64[i:i + chunk_size] for i in range(0, len(b64), chunk_size)] or [""]
+        # Open a long-lived script that accumulates chunks and writes once.
+        path_j = json.dumps(device_path)
+        js = (
+            "var __chunks = [];\n"
+            "rpc.exports = {\n"
+            "  pushChunk: function(s) { __chunks.push(s); return __chunks.length; },\n"
+            "  pushFinish: function() {\n"
+            "    try {\n"
+            "      var b64 = __chunks.join('');\n"
+            "      var dataB64 = ObjC.classes.NSString.stringWithString_(b64);\n"
+            "      var nsdata = ObjC.classes.NSData.alloc().initWithBase64EncodedString_options_(dataB64, 0);\n"
+            "      if (!nsdata) return {ok:false, error:'base64 decode failed'};\n"
+            "      var ok = nsdata.writeToFile_atomically_(" + path_j + ", true);\n"
+            "      __chunks = [];\n"
+            "      return {ok: !!ok, bytes: nsdata.length()};\n"
+            "    } catch(e) { return {ok:false, error: e.message}; }\n"
+            "  }\n"
+            "};\n"
+            "send({__ready: true});\n"
+        )
+        ready = threading.Event()
+        def on_msg(msg, data):
+            if msg.get("type") == "send" and isinstance(msg.get("payload"), dict) and msg["payload"].get("__ready"):
+                ready.set()
+        script = session.create_script(js)
+        script.on("message", on_msg)
+        script.load()
+        ready.wait(5)
+        try:
+            for c in chunks:
+                script.exports_sync.push_chunk(c)
+            result = script.exports_sync.push_finish()
+        finally:
+            try: script.unload()
+            except Exception: pass
+        if not result.get("ok"):
+            return {"success": False, "error": result.get("error", "write failed")}
+        return {
+            "success": True,
+            "device_path": device_path,
+            "local_size": size,
+            "device_size": result.get("bytes", size),
+            "chunks": len(chunks),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── HAR export ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def har_export(output_path: str, count: int = 500, session_id: str = "") -> dict:
+    """Export captured requests as a HAR 1.2 archive (host-side file)."""
+    try:
+        sid, _ = _get_session(session_id)
+        net_script = _intercept_rules.get(sid, {}).get("net_script")
+        if not net_script:
+            return {"success": False, "error": "Network capture not active."}
+        txns = net_script.exports_sync.get_transactions(int(count))
+
+        def to_har_headers(d):
+            return [{"name": str(k), "value": str(v)} for k, v in (d or {}).items()]
+
+        def parse_url_query(url):
+            try:
+                from urllib.parse import urlsplit, parse_qsl
+                q = urlsplit(url).query
+                return [{"name": k, "value": v} for k, v in parse_qsl(q, keep_blank_values=True)]
+            except Exception:
+                return []
+
+        entries = []
+        for t in txns:
+            ts_ms = t.get("timestamp", 0) or 0
+            started = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(ts_ms / 1000.0)) + ".000Z" if ts_ms else "1970-01-01T00:00:00.000Z"
+            url = t.get("url", "")
+            method = t.get("method", "GET")
+            req_body = t.get("req_body", "") or ""
+            resp_body = t.get("resp_body", "") or ""
+            entry = {
+                "startedDateTime": started,
+                "time": int(t.get("duration_ms", 0) or 0),
+                "request": {
+                    "method": method,
+                    "url": url,
+                    "httpVersion": "HTTP/1.1",
+                    "cookies": [],
+                    "headers": to_har_headers(t.get("headers")),
+                    "queryString": parse_url_query(url),
+                    "headersSize": -1,
+                    "bodySize": len(req_body.encode("utf-8", "ignore")),
+                },
+                "response": {
+                    "status": int(t.get("status", -1) or -1),
+                    "statusText": "",
+                    "httpVersion": "HTTP/1.1",
+                    "cookies": [],
+                    "headers": to_har_headers(t.get("resp_headers")),
+                    "content": {
+                        "size": len(resp_body.encode("utf-8", "ignore")),
+                        "mimeType": (t.get("resp_headers", {}) or {}).get("Content-Type", ""),
+                        "text": resp_body,
+                    },
+                    "redirectURL": "",
+                    "headersSize": -1,
+                    "bodySize": len(resp_body.encode("utf-8", "ignore")),
+                },
+                "cache": {},
+                "timings": {"send": 0, "wait": int(t.get("duration_ms", 0) or 0), "receive": 0},
+            }
+            if method != "GET" and req_body:
+                entry["request"]["postData"] = {
+                    "mimeType": (t.get("headers", {}) or {}).get("Content-Type", "application/octet-stream"),
+                    "text": req_body,
+                }
+            entries.append(entry)
+        har = {
+            "log": {
+                "version": "1.2",
+                "creator": {"name": "frida-mcp-server", "version": "1.1.0"},
+                "entries": entries,
+            }
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(har, f, indent=2)
+        return {"success": True, "output_path": output_path, "entries": len(entries)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ── Intercept dry-run ───────────────────────────────────────────────────
+
+@mcp.tool()
+def intercept_match(
+    pattern: str = "", regex: str = "", method_filter: str = "",
+    count: int = 200, session_id: str = "",
+) -> dict:
+    """Test which captured requests an intercept rule would match without
+    installing it. Useful for verifying patterns before going live."""
+    try:
+        sid, _ = _get_session(session_id)
+        net_script = _intercept_rules.get(sid, {}).get("net_script")
+        if not net_script:
+            return {"success": False, "error": "Network capture not active."}
+        txns = net_script.exports_sync.get_transactions(int(count))
+        rx = None
+        if regex:
+            try:
+                rx = re.compile(regex)
+            except re.error as e:
+                return {"success": False, "error": "bad regex: " + str(e)}
+        mf = (method_filter or "").upper()
+        matches = []
+        for i, t in enumerate(txns):
+            url = t.get("url", "") or ""
+            method = (t.get("method", "") or "").upper()
+            if mf and method != mf:
+                continue
+            if rx is not None:
+                if not rx.search(url):
+                    continue
+            elif pattern:
+                if pattern not in url:
+                    continue
+            else:
+                continue
+            matches.append({"index": i, "method": method, "url": url, "status": t.get("status", -1)})
+        return {
+            "success": True,
+            "pattern": pattern, "regex": regex, "method_filter": method_filter,
+            "count": len(matches),
+            "matches": matches,
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 
 def main():
     import argparse

@@ -60,7 +60,7 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               flex_mcp_server.py (Python MCP Server)         │
-│    • 53 MCP tools with short names                           │
+│    • 64 MCP tools with short names                           │
 │    • Session management with health checks                   │
 │    • JS execution engine with ObjC.schedule(mainQueue)       │
 │    • Auto-retry on dead sessions                             │
@@ -82,7 +82,7 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
 - **Zero FLEX dependency** — All network capture uses pure Frida NSURLSession hooks. No FLEX framework needs to be embedded in the target app.
 - **Main queue safety** — All ObjC calls are wrapped in `ObjC.schedule(ObjC.mainQueue)` to prevent UIKit/AppKit crashes from background thread access.
 - **Session resilience** — Every tool call checks session health. Dead sessions are detected, cleaned up, and the agent is informed automatically.
-- **Short tool names** — All 53 tools use concise, distinctive names (`apps`, `connect`, `requests`, `replay`, `scan`, `keychain`, `classes`, `trace`, `dump`, `crypto`, etc.) for efficient agent usage.
+- **Short tool names** — All 64 tools use concise, distinctive names (`apps`, `connect`, `requests`, `replay`, `replay_as`, `race`, `diff`, `webviews`, `swift_classes`, `har_export`, etc.) for efficient agent usage.
 
 ---
 
@@ -252,7 +252,7 @@ flex-mcp-server serve --transport sse --port 8099
 
 ## Tool Categories
 
-The server exposes **53 tools** across 11 categories. See [TOOLS.md](TOOLS.md) for the complete reference.
+The server exposes **64 tools** across 13 categories. See [TOOLS.md](TOOLS.md) for the complete reference.
 
 ### Connection (5 tools)
 `apps`, `connect`, `spawn`, `sessions`, `disconnect`
@@ -260,11 +260,11 @@ The server exposes **53 tools** across 11 categories. See [TOOLS.md](TOOLS.md) f
 ### App Info (2 tools)
 `info`, `modules`
 
-### Network Capture (4 tools)
-`requests`, `request`, `monitor`, `search`
+### Network Capture (6 tools)
+`requests`, `request`, `monitor`, `search`, `ws_frames`, `har_export`
 
-### Request Replay & Interception (6 tools)
-`replay`, `intercept`, `intercepts`, `intercept_toggle`, `intercept_rm`, `intercept_logs`
+### Request Replay & Interception (10 tools)
+`replay`, `replay_as`, `race`, `diff`, `intercept`, `intercept_match`, `intercepts`, `intercept_toggle`, `intercept_rm`, `intercept_logs`
 
 ### Security Analysis (4 tools)
 `scan`, `fuzz`, `endpoints`, `jwt`
@@ -272,11 +272,17 @@ The server exposes **53 tools** across 11 categories. See [TOOLS.md](TOOLS.md) f
 ### Attack Surface (6 tools)
 `schemes`, `open_url`, `entitlements`, `pasteboard`, `memory`, `strings`
 
-### Storage (8 tools)
-`defaults`, `defaults_set`, `keychain`, `cookies`, `files`, `read`, `pull`, `sqlite`, `sqlite_query`
+### Storage (10 tools)
+`defaults`, `defaults_set`, `keychain`, `cookies`, `files`, `read`, `pull`, `push`, `sqlite`, `sqlite_query`
 
 ### Objective-C Runtime (6 tools)
 `classes`, `methods`, `instances`, `inspect`, `call`, `exec`
+
+### Swift Runtime (3 tools)
+`swift_modules`, `swift_classes`, `swift_methods`
+
+### WebViews & Bridges (3 tools)
+`webviews`, `webview_eval`, `jsbridge`
 
 ### Method Tracing (4 tools)
 `trace`, `trace_logs`, `traces`, `trace_stop`
@@ -366,6 +372,34 @@ requests(count=100)
 jwt(token="eyJ...")
 ```
 
+### IDOR / BOLA in Two Calls
+
+```
+replay_as(index=0, auth="Bearer <user_b_token>")
+diff(a_index=0, b_index=<latest>)
+```
+
+### Race Condition Probe
+
+```
+race(index=0, n=20, delay_ms=0)
+# inspect by_status — multiple 200s on a "redeem once" endpoint = abuse
+```
+
+### Export Capture to HAR
+
+```
+har_export(output_path="./capture.har", count=500)
+```
+
+### WebView Inspection
+
+```
+webviews()
+webview_eval(js="document.cookie")
+jsbridge()
+```
+
 ### Memory Scan for Secrets
 
 ```
@@ -450,7 +484,7 @@ flex-mcp-server/
 │   └── ios-advanced-pentest/
 │       └── SKILL.md            # Bundled pentest methodology skill
 ├── docs/                       # Additional documentation
-├── flex_mcp_server.py          # Python MCP server (pure Frida, 53 tools)
+├── flex_mcp_server.py          # Python MCP server (pure Frida, 64 tools)
 ├── TOOLS.md                    # Complete tool reference with examples
 ├── README.md                   # This file
 ├── package.json                # npm package manifest

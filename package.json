@@ -1,13 +1,12 @@
 {
   "name": "flex-mcp-server",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "MCP server for iOS app inspection with Frida — zero FLEX dependency.",
   "bin": {
     "flex-mcp-server": "./bin/cli.js"
   },
   "files": [
     "bin/",
-    "docs/",
     "skills/",
     "flex_mcp_server.py",
     "mcp.config.example.jsonc",
