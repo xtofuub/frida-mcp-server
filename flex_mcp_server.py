@@ -400,6 +400,11 @@ _NETWORK_CAPTURE_JS = r"""
     var wsMax = 2000;
     // Map task pointer -> txn so onEnter (request) and onLeave (response) align
     var pending = {};
+    // Track tasks that have already been completed to avoid double-pushes
+    // when both setState: and _didFinishWithError: fire.
+    var completed = {};
+    var completedKeys = [];
+    var completedMax = 5000;
 
     function dataToStr(d) {
         if (!d || (d.isNull && d.isNull())) return '';
@@ -447,7 +452,29 @@ _NETWORK_CAPTURE_JS = r"""
     function completeFromTask(task, dataObj, errorObj) {
         try {
             var key = task.handle.toString();
+            // Skip if this task was already fully completed.
+            if (completed[key]) {
+                // Optionally refresh response on second pass.
+                var existing = completed[key];
+                try {
+                    var resp2 = task.response ? task.response() : null;
+                    if (resp2 && !resp2.isNull()) {
+                        if (existing.status === -1 && resp2.respondsToSelector_(ObjC.selector('statusCode'))) {
+                            existing.status = resp2.statusCode();
+                        }
+                        if ((!existing.resp_headers || !Object.keys(existing.resp_headers).length) &&
+                            resp2.respondsToSelector_(ObjC.selector('allHeaderFields'))) {
+                            existing.resp_headers = headersToObj(resp2.allHeaderFields());
+                        }
+                    }
+                } catch(e) {}
+                if (dataObj && !dataObj.isNull() && !existing.resp_body) {
+                    existing.resp_body = dataToStr(dataObj);
+                }
+                return;
+            }
             var txn = pending[key];
+            var wasInPending = !!txn;
             if (!txn) {
                 var req = task.currentRequest ? task.currentRequest() : null;
                 if (!req && task.originalRequest) req = task.originalRequest();
@@ -470,9 +497,14 @@ _NETWORK_CAPTURE_JS = r"""
                 try { txn.error = String(errorObj.localizedDescription()); } catch(e) {}
             }
             txn.duration_ms = Date.now() - txn.timestamp;
-            // txn is already in transactions (pushed from resume hook).
-            // If it was a late-discovered task not in pending, push it now.
-            if (!pending[key]) pushTxn(txn);
+            if (!wasInPending) pushTxn(txn);
+            // Mark completed (with bounded size to avoid leaks).
+            completed[key] = txn;
+            completedKeys.push(key);
+            if (completedKeys.length > completedMax) {
+                var old = completedKeys.shift();
+                delete completed[old];
+            }
             delete pending[key];
         } catch(e) {}
     }
@@ -523,57 +555,71 @@ _NETWORK_CAPTURE_JS = r"""
         } catch(e) {}
     }
 
-    // Hook delegate response on the canonical NSURLSessionTask base class
-    // for status / response headers when no completion block is supplied.
+    // Hook setState: on every concrete task subclass (deduped by IMP).
+    // Subclasses like __NSCFLocalDataTask and NWURLSessionTask override
+    // setState:, so a hook on the abstract base never fires for them.
     function hookTaskCompletion() {
         try {
-            var base = ObjC.classes.NSURLSessionTask;
-            if (!base) return;
-            // -[NSURLSessionTask _onqueue_didFinishWithError:] is internal but stable.
-            // Fall back to KVO-style hook: swizzle setState:.
-            var setState = base['- setState:'];
-            if (setState) {
-                Interceptor.attach(setState.implementation, {
-                    onEnter: function(args) {
-                        this.task = new ObjC.Object(args[0]);
-                        this.newState = args[2].toInt32 ? args[2].toInt32() : parseInt(args[2]);
-                    },
-                    onLeave: function(retval) {
-                        try {
-                            // NSURLSessionTaskStateCompleted = 2
-                            if (this.newState !== 2) return;
-                            var task = this.task;
-                            var data = null;
+            var seenImps = {};
+            var classes = ObjC.classes;
+            for (var name in classes) {
+                if (name.indexOf('Task') === -1) continue;
+                if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
+                try {
+                    var cls = classes[name];
+                    var sel = cls['- setState:'];
+                    if (!sel) continue;
+                    var imp = sel.implementation.toString();
+                    if (seenImps[imp]) continue;
+                    seenImps[imp] = true;
+                    Interceptor.attach(sel.implementation, {
+                        onEnter: function(args) {
                             try {
-                                // Many CFNetwork tasks expose -_responseData when complete
-                                if (task.respondsToSelector_(ObjC.selector('_responseData'))) {
-                                    data = task['- _responseData']();
-                                }
+                                this.task = new ObjC.Object(args[0]);
+                                // args[2] is a NativePointer; the state is its low 32 bits.
+                                this.newState = parseInt(args[2].toString());
                             } catch(e) {}
-                            var err = null;
+                        },
+                        onLeave: function(retval) {
                             try {
-                                if (task.error) err = task.error();
+                                // NSURLSessionTaskStateCompleted = 2
+                                if (this.newState !== 2) return;
+                                var task = this.task;
+                                if (!task) return;
+                                var data = null;
+                                try {
+                                    if (task.respondsToSelector_(ObjC.selector('_responseData'))) {
+                                        data = task['- _responseData']();
+                                    }
+                                } catch(e) {}
+                                var err = null;
+                                try {
+                                    if (task.error) err = task.error();
+                                } catch(e) {}
+                                completeFromTask(task, data, err);
                             } catch(e) {}
-                            completeFromTask(task, data, err);
-                        } catch(e) {}
-                    }
-                });
-                hookCount++;
+                        }
+                    });
+                    hookCount++;
+                } catch(e) {}
             }
         } catch(e) {}
     }
 
-    // Wrap NSURLSession completion-handler entry points so we can grab
-    // response bodies even when the app doesn't use a delegate.
+    // Wrap NSURLSession completion-handler entry points. Captures the
+    // task pointer for response correlation and (when a completion block
+    // is present) wraps it to grab the actual response body.
     function wrapCompletionAPI(selector) {
         try {
             var cls = ObjC.classes.NSURLSession;
             var m = cls[selector];
             if (!m) return;
+            // Selector ending in ":" count signals how many args the method takes.
+            // For "...completionHandler:" the block is the LAST objc arg.
+            var hasCompletion = selector.indexOf('completionHandler:') !== -1;
             Interceptor.attach(m.implementation, {
                 onEnter: function(args) {
                     try {
-                        // arg2 = NSURLRequest (or NSURL), last arg = completion block
                         var maybeReq = new ObjC.Object(args[2]);
                         var className = maybeReq.$className || '';
                         var req = null;
@@ -582,7 +628,6 @@ _NETWORK_CAPTURE_JS = r"""
                         } else if (className.indexOf('URL') !== -1) {
                             req = ObjC.classes.NSURLRequest.requestWithURL_(maybeReq);
                         }
-                        this.req = req;
                         this.snapshot = snapshotRequest(req);
                     } catch(e) {}
                 },
@@ -600,9 +645,53 @@ _NETWORK_CAPTURE_JS = r"""
         } catch(e) {}
     }
 
+    // Last-resort completion fallback: hook -[*Task _didFinishWithError:]
+    // when present. This is the unified internal completion entry point on
+    // most CFNetwork-backed task subclasses (covers Network.framework
+    // tasks where setState: doesn't fire predictably).
+    function hookDidFinishWithError() {
+        try {
+            var seenImps = {};
+            var classes = ObjC.classes;
+            var selectors = ['- _didFinishWithError:', '- didFinishWithError:'];
+            for (var name in classes) {
+                if (name.indexOf('Task') === -1) continue;
+                if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
+                var cls = classes[name];
+                for (var s = 0; s < selectors.length; s++) {
+                    try {
+                        var sel = cls[selectors[s]];
+                        if (!sel) continue;
+                        var imp = sel.implementation.toString();
+                        if (seenImps[imp]) continue;
+                        seenImps[imp] = true;
+                        Interceptor.attach(sel.implementation, {
+                            onEnter: function(args) {
+                                try {
+                                    var task = new ObjC.Object(args[0]);
+                                    var errPtr = args[2];
+                                    var err = (errPtr && !errPtr.isNull()) ? new ObjC.Object(errPtr) : null;
+                                    var data = null;
+                                    try {
+                                        if (task.respondsToSelector_(ObjC.selector('_responseData'))) {
+                                            data = task['- _responseData']();
+                                        }
+                                    } catch(e) {}
+                                    completeFromTask(task, data, err);
+                                } catch(e) {}
+                            }
+                        });
+                        hookCount++;
+                    } catch(e) {}
+                }
+            }
+        } catch(e) {}
+    }
+
     function installAll() {
         hookResumeOnSubclasses();
         hookTaskCompletion();
+        hookDidFinishWithError();
         wrapCompletionAPI('- dataTaskWithRequest:completionHandler:');
         wrapCompletionAPI('- dataTaskWithURL:completionHandler:');
         wrapCompletionAPI('- uploadTaskWithRequest:fromData:completionHandler:');
@@ -723,7 +812,7 @@ _NETWORK_CAPTURE_JS = r"""
             var c = Math.min(count || 50, transactions.length);
             return transactions.slice(-c);
         },
-        clearTransactions: function() { transactions = []; pending = {}; return true; },
+        clearTransactions: function() { transactions = []; pending = {}; completed = {}; completedKeys = []; return true; },
         getWsFrames: function(count) {
             var c = Math.min(count || 100, wsFrames.length);
             return wsFrames.slice(-c);
