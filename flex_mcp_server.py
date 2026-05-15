@@ -486,8 +486,8 @@ _NETWORK_CAPTURE_JS = r"""
             var seenImps = {};
             var classes = ObjC.classes;
             for (var name in classes) {
-                if (name.indexOf('SessionTask') === -1 && name.indexOf('NSURLSessionTask') === -1) continue;
                 if (name.indexOf('Task') === -1) continue;
+                if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
                 try {
                     var cls = classes[name];
                     var sel = cls['- resume'];
@@ -1765,20 +1765,21 @@ def open_url(url: str, session_id: str = "") -> dict:
     try:
         _, session = _get_session(session_id)
         u = json.dumps(url)
-        r = exec_js(session, """
-(function(){
-    var nsurl = ObjC.classes.NSURL.URLWithString_(""" + u + R"""");
-    if (!nsurl) return JSON.stringify({ok: false, error: 'invalid URL'});
-    var app = ObjC.classes.UIApplication.sharedApplication();
-    if (app['- openURL:options:completionHandler:']) {
-        var empty = ObjC.classes.NSDictionary.dictionary();
-        app.openURL_options_completionHandler_(nsurl, empty, null);
-    } else {
-        app.openURL_(nsurl);
-    }
-    return JSON.stringify({ok: true, opened: """ + u + R"""});
-})()
-""", timeout=10)
+        js = (
+            "(function(){"
+            "var nsurl = ObjC.classes.NSURL.URLWithString_(" + u + ");"
+            "if (!nsurl) return JSON.stringify({ok: false, error: 'invalid URL'});"
+            "var app = ObjC.classes.UIApplication.sharedApplication();"
+            "if (app['- openURL:options:completionHandler:']) {"
+            "  var empty = ObjC.classes.NSDictionary.dictionary();"
+            "  app.openURL_options_completionHandler_(nsurl, empty, null);"
+            "} else {"
+            "  app.openURL_(nsurl);"
+            "}"
+            "return JSON.stringify({ok: true, opened: " + u + "});"
+            "})()"
+        )
+        r = exec_js(session, js, timeout=10)
         if r.get("ok"):
             data = json.loads(r["result"])
             return {"success": data.get("ok", False), **data}
