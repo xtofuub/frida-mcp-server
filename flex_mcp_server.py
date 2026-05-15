@@ -795,11 +795,90 @@ _NETWORK_CAPTURE_JS = r"""
         } catch(e) {}
     }
 
+    // FLEX-equivalent universal capture: register a custom NSURLProtocol
+    // subclass and inject it into every NSURLSessionConfiguration so
+    // +canInitWithRequest: fires for every outbound request — including
+    // requests that go through task subclasses our other hooks miss.
+    function installProtocolObserver() {
+        try {
+            if (ObjC.classes.FlexCaptureProtocol) return;
+            var marker = '_flex_observed';
+            var FlexCaptureProtocol = ObjC.registerClass({
+                name: 'FlexCaptureProtocol',
+                super: ObjC.classes.NSURLProtocol,
+                methods: {
+                    '+ canInitWithRequest:': {
+                        retType: 'bool',
+                        argTypes: ['object'],
+                        implementation: function(req) {
+                            try {
+                                var nsreq = new ObjC.Object(req);
+                                // Avoid recursion: skip if we've already observed this one.
+                                if (nsreq.valueForHTTPHeaderField_(marker)) return false;
+                                var snap = snapshotRequest(nsreq);
+                                if (snap) pushTxn(snap);
+                            } catch(e) {}
+                            return false; // observe-only, never actually handle
+                        }
+                    },
+                    '+ canonicalRequestForRequest:': {
+                        retType: 'object',
+                        argTypes: ['object'],
+                        implementation: function(req) { return req; }
+                    },
+                    '+ requestIsCacheEquivalent:toRequest:': {
+                        retType: 'bool',
+                        argTypes: ['object', 'object'],
+                        implementation: function() { return false; }
+                    },
+                    '- startLoading': {
+                        retType: 'void',
+                        argTypes: [],
+                        implementation: function() {}
+                    },
+                    '- stopLoading': {
+                        retType: 'void',
+                        argTypes: [],
+                        implementation: function() {}
+                    }
+                }
+            });
+
+            // Register globally for NSURLConnection-style traffic.
+            try { ObjC.classes.NSURLProtocol.registerClass_(FlexCaptureProtocol); } catch(e) {}
+
+            // Swizzle -[NSURLSessionConfiguration protocolClasses] so every
+            // session configuration includes our protocol at index 0.
+            try {
+                var cfgCls = ObjC.classes.NSURLSessionConfiguration;
+                if (cfgCls) {
+                    var sel = cfgCls['- protocolClasses'];
+                    if (sel) {
+                        var orig = sel.implementation;
+                        Interceptor.attach(orig, {
+                            onLeave: function(retval) {
+                                try {
+                                    if (!retval || retval.isNull()) return;
+                                    var arr = new ObjC.Object(retval);
+                                    var mut = arr.mutableCopy();
+                                    mut.insertObject_atIndex_(FlexCaptureProtocol, 0);
+                                    retval.replace(mut);
+                                } catch(e) {}
+                            }
+                        });
+                        hookCount++;
+                    }
+                }
+            } catch(e) {}
+        } catch(e) {}
+    }
+
     function installAll() {
         hookResumeOnSubclasses();
         hookTaskCompletion();
         hookDidFinishWithError();
         hookDelegateData();
+        installProtocolObserver();
         wrapCompletionAPI('- dataTaskWithRequest:completionHandler:');
         wrapCompletionAPI('- dataTaskWithURL:completionHandler:');
         wrapCompletionAPI('- uploadTaskWithRequest:fromData:completionHandler:');
