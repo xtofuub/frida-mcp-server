@@ -13,6 +13,35 @@ When the `flex-mcp-server` (a.k.a. `frida-flex`) MCP server is connected, use th
 | `otool -L`, list loaded dylibs | `flex_modules(search, limit)` | Lists every loaded Mach-O module with base, size, on-disk path. |
 | Bundle info / sandbox path | `flex_app_info` | Bundle id, version, build, sandbox HOME. |
 
+## UI automation
+
+Use these when the agent needs to drive the app itself instead of asking the user to tap around manually.
+
+| Skill step | MCP tool | Notes |
+|---|---|---|
+| Inspect current screen | `flex_ui_tree(max_depth, include_hidden, max_nodes)` | Returns UIKit nodes with id, class, text/title/placeholder, accessibility label/id/value, visible/enabled state, and screen frame. |
+| Find an element | `flex_ui_find(query, class_name, include_hidden)` | Search by text, accessibility metadata, placeholder, title, or class. Prefer visible enabled controls. |
+| Press a control | `flex_ui_tap(element_id OR text OR x/y)` | Prefer `element_id` from the tree. Text search is useful for buttons like Login/Continue. Coordinate hit-test is a fallback. |
+| Fill forms | `flex_ui_type_text(element_id OR query, text, clear)` | Sets text and emits editing-changed for UIControl text fields when possible. |
+| Move through lists | `flex_ui_scroll(element_id, direction, amount)` | Scroll a selected `UIScrollView`, or the first visible scroll view. |
+
+Autonomous navigation loop:
+
+```
+flex_connect("com.target.app")
+flex_network(true)
+flex_ui_tree(max_depth=8)
+flex_ui_find(query="login")
+flex_ui_tap(text="Login")
+flex_ui_type_text(query="email", text="<authorized-test-account>")
+flex_ui_type_text(query="password", text="<authorized-test-password>")
+flex_ui_tap(text="Sign In")
+flex_monitor()
+flex_scan_vulnerabilities(count=200)
+```
+
+The agent should choose targets using semantic metadata first (accessibility label/id, visible text, class, enabled state) and use coordinates only as a fallback.
+
 ## Static + dynamic recon
 
 | Skill step | MCP tool |

@@ -1,6 +1,6 @@
 # flex-mcp-server
 
-`flex-mcp-server` is a local MCP server for authorized iOS app inspection with [Frida](https://frida.re) and [FLEX](https://github.com/Flipboard/FLEX). It exposes 50+ `flex_*` tools for attaching to apps, capturing and replaying traffic, fuzzing requests, scanning for common mobile API issues, browsing storage, tracing Objective-C methods, dumping binaries, and installing common SSL or jailbreak bypass hooks.
+`flex-mcp-server` is a local MCP server for authorized iOS app inspection with [Frida](https://frida.re) and [FLEX](https://github.com/Flipboard/FLEX). It exposes 60+ `flex_*` tools for attaching to apps, driving the UI, capturing and replaying traffic, fuzzing requests, scanning for common mobile API issues, browsing storage, tracing Objective-C methods, dumping binaries, and installing common SSL or jailbreak bypass hooks.
 
 The repo also bundles an MCP-aware `reverse-engineering-ios-app-with-frida` skill so compatible agents can use the server with a guided mobile security workflow.
 
@@ -239,6 +239,16 @@ All tools return a dictionary with `success` plus tool-specific fields. Most too
 | `flex_app_info(session_id)` | Return bundle id, version, build, paths, and runtime context. |
 | `flex_modules(search, limit, session_id)` | List loaded Mach-O modules. |
 
+### UI Automation
+
+| Tool | Description |
+| --- | --- |
+| `flex_ui_tree(max_depth, include_hidden, max_nodes, session_id)` | Return the UIKit view tree with object ids, class names, text/accessibility fields, visibility, enabled state, and best-effort screen frames. |
+| `flex_ui_find(query, class_name, include_hidden, max_depth, limit, session_id)` | Search the UI tree by text, accessibility label/identifier/value, placeholder, title, or class. |
+| `flex_ui_tap(element_id, text, x, y, include_hidden, session_id)` | Activate a view by tree id, text query, or coordinate hit-test. Prefers accessibility and `UIControl` actions over raw touch injection. |
+| `flex_ui_type_text(element_id, text, query, clear, session_id)` | Set or insert text into a UIKit text input found by id or semantic query. |
+| `flex_ui_scroll(element_id, direction, amount, session_id)` | Scroll a target `UIScrollView`, or the first visible scroll view if no id is provided. |
+
 ### Network Capture
 
 | Tool | Description |
@@ -369,6 +379,26 @@ flex_methods(class_name="AuthManager")
 flex_trace_start(class_name="AuthManager", selector="- loginWithToken:")
 flex_trace_logs(clear=true)
 ```
+
+Autonomous UI plus traffic loop:
+
+```text
+flex_connect("com.example.target")
+flex_network(true)
+flex_ui_tree(max_depth=8)
+flex_ui_find(query="login")
+flex_ui_tap(text="Login")
+flex_ui_type_text(query="email", text="researcher@example.com")
+flex_ui_type_text(query="password", text="<test-password>")
+flex_ui_tap(text="Sign In")
+flex_monitor()
+flex_scan_vulnerabilities(count=200)
+flex_request_details(index=12)
+flex_replay_request(index=12, headers={"Authorization": "Bearer <test-token>"})
+flex_fuzz_request(index=12, target="body.email", payload_set="sqli")
+```
+
+The agent decides what to press from the structured UI tree: visible labels, accessibility metadata, control class, enabled state, and frame. It should prefer semantic identifiers over coordinates, then use network capture/replay/fuzzing only inside your authorized test scope.
 
 ## Repository Layout
 

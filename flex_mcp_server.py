@@ -102,6 +102,35 @@ def exec_js_stream(session, js_code, timeout=300, on_chunk=None):
     return {"info": info, "chunks": chunks, "error": error["msg"]}
 
 
+def exec_js_main(session, js_body, timeout=15):
+    """Run Frida JS on the iOS main queue and return the stringified result."""
+    script = f"""
+    if (!ObjC.available) {{
+        send({{__done: true, ok: false, error: 'ObjC runtime unavailable'}});
+    }} else {{
+        ObjC.schedule(ObjC.mainQueue, function() {{
+            try {{
+                var __result = (function() {{
+                    {js_body}
+                }})();
+                send({{__done: true, ok: true, result: __result !== undefined ? String(__result) : 'undefined'}});
+            }} catch (e) {{
+                send({{__done: true, ok: false, error: e.message || String(e), stack: e.stack || ''}});
+            }}
+        }});
+    }}
+    """
+    out = exec_js_stream(session, script, timeout=timeout)
+    if out.get("error"):
+        return {"ok": False, "error": out["error"]}
+    info = out.get("info", {})
+    if not info.get("__done"):
+        return {"ok": False, "error": "timeout"}
+    if not info.get("ok"):
+        return {"ok": False, "error": info.get("error", "unknown error"), "stack": info.get("stack", "")}
+    return {"ok": True, "result": info.get("result", "undefined")}
+
+
 def safe_str(s, maxlen=500):
     if not s:
         return ""
@@ -1492,6 +1521,491 @@ def flex_open_url(url: str, session_id: str = "") -> dict:
             }}
             return JSON.stringify({{ok: true, opened: {u}}});
         }})()
+        """, timeout=10)
+        if r.get("ok"):
+            data = json.loads(r["result"])
+            return {"success": data.get("ok", False), **data}
+        return {"success": False, "error": str(r)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+_UI_JS_HELPERS = r"""
+function safeStr(v) {
+    try {
+        if (v === null || v === undefined) return '';
+        if (v.isNull && v.isNull()) return '';
+        return String(v);
+    } catch (e) {
+        return '';
+    }
+}
+
+function className(v) {
+    try { return String(v.$className || v.class()); } catch (e) { return '<unknown>'; }
+}
+
+function responds(v, sel) {
+    try { return !!v.respondsToSelector_(sel); } catch (e) { return false; }
+}
+
+function callStr(v, sel, jsName) {
+    try {
+        if (!responds(v, sel)) return '';
+        var fn = v[jsName || sel.replace(/:/g, '_')];
+        if (!fn) return '';
+        return safeStr(fn.call(v));
+    } catch (e) {
+        return '';
+    }
+}
+
+function callBool(v, sel, jsName, fallback) {
+    try {
+        if (!responds(v, sel)) return fallback;
+        var fn = v[jsName || sel.replace(/:/g, '_')];
+        if (!fn) return fallback;
+        return !!fn.call(v);
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function callNum(v, sel, jsName, fallback) {
+    try {
+        if (!responds(v, sel)) return fallback;
+        var fn = v[jsName || sel.replace(/:/g, '_')];
+        if (!fn) return fallback;
+        var n = Number(fn.call(v));
+        return isNaN(n) ? fallback : n;
+    } catch (e) {
+        return fallback;
+    }
+}
+
+function rectToObj(r) {
+    var out = {x: 0, y: 0, width: 0, height: 0};
+    try {
+        if (r.origin && r.size) {
+            out.x = Number(r.origin.x);
+            out.y = Number(r.origin.y);
+            out.width = Number(r.size.width);
+            out.height = Number(r.size.height);
+        } else if (r[0] && r[1]) {
+            out.x = Number(r[0][0]);
+            out.y = Number(r[0][1]);
+            out.width = Number(r[1][0]);
+            out.height = Number(r[1][1]);
+        }
+    } catch (e) {
+        out.raw = safeStr(r);
+    }
+    out.center_x = out.x + out.width / 2;
+    out.center_y = out.y + out.height / 2;
+    return out;
+}
+
+function pointToObj(p) {
+    try {
+        if (p.x !== undefined) return {x: Number(p.x), y: Number(p.y)};
+        if (p[0] !== undefined) return {x: Number(p[0]), y: Number(p[1])};
+    } catch (e) {}
+    return {x: 0, y: 0};
+}
+
+function sizeToObj(s) {
+    try {
+        if (s.width !== undefined) return {width: Number(s.width), height: Number(s.height)};
+        if (s[0] !== undefined) return {width: Number(s[0]), height: Number(s[1])};
+    } catch (e) {}
+    return {width: 0, height: 0};
+}
+
+function screenFrame(v) {
+    try {
+        var b = v.bounds();
+        return rectToObj(v.convertRect_toView_(b, ptr(0)));
+    } catch (e) {
+        try { return rectToObj(v.frame()); } catch (e2) { return rectToObj(null); }
+    }
+}
+
+function isHidden(v) {
+    return callBool(v, 'isHidden', 'isHidden', false);
+}
+
+function isVisible(v) {
+    return !isHidden(v) && callNum(v, 'alpha', 'alpha', 1) > 0.01;
+}
+
+function isEnabled(v) {
+    return callBool(v, 'isEnabled', 'isEnabled', true);
+}
+
+function isControl(v) {
+    try { return !!ObjC.classes.UIControl && v.isKindOfClass_(ObjC.classes.UIControl); } catch (e) { return false; }
+}
+
+function isScrollView(v) {
+    try { return !!ObjC.classes.UIScrollView && v.isKindOfClass_(ObjC.classes.UIScrollView); } catch (e) { return false; }
+}
+
+function textFields(v) {
+    var fields = {
+        text: callStr(v, 'text', 'text'),
+        title: callStr(v, 'currentTitle', 'currentTitle'),
+        placeholder: callStr(v, 'placeholder', 'placeholder'),
+        accessibility_label: callStr(v, 'accessibilityLabel', 'accessibilityLabel'),
+        accessibility_identifier: callStr(v, 'accessibilityIdentifier', 'accessibilityIdentifier'),
+        accessibility_value: callStr(v, 'accessibilityValue', 'accessibilityValue')
+    };
+    var best = fields.accessibility_label || fields.text || fields.title || fields.placeholder ||
+        fields.accessibility_identifier || fields.accessibility_value || '';
+    fields.best = best;
+    return fields;
+}
+
+function summarizeView(v, path) {
+    var frame = screenFrame(v);
+    var text = textFields(v);
+    return {
+        id: v.handle.toString(),
+        path: path,
+        class: className(v),
+        text: text.text,
+        title: text.title,
+        placeholder: text.placeholder,
+        accessibility_label: text.accessibility_label,
+        accessibility_identifier: text.accessibility_identifier,
+        accessibility_value: text.accessibility_value,
+        label: text.best,
+        frame: frame,
+        visible: isVisible(v),
+        enabled: isEnabled(v),
+        user_interaction_enabled: callBool(v, 'isUserInteractionEnabled', 'isUserInteractionEnabled', true),
+        control: isControl(v),
+        scroll_view: isScrollView(v)
+    };
+}
+
+function getWindows() {
+    var out = [];
+    var app = ObjC.classes.UIApplication.sharedApplication();
+    var windows = app.windows();
+    for (var i = 0; i < windows.count(); i++) {
+        try { out.push(windows.objectAtIndex_(i)); } catch (e) {}
+    }
+    return out;
+}
+
+function walkViews(callback, includeHidden, maxDepth, maxNodes) {
+    var count = 0;
+    function rec(v, depth, path) {
+        if (count >= maxNodes) return;
+        if (!includeHidden && !isVisible(v) && depth > 0) return;
+        count += 1;
+        callback(v, depth, path);
+        if (depth >= maxDepth) return;
+        try {
+            var subviews = v.subviews();
+            for (var i = 0; i < subviews.count(); i++) {
+                rec(subviews.objectAtIndex_(i), depth + 1, path + '.' + i);
+                if (count >= maxNodes) return;
+            }
+        } catch (e) {}
+    }
+    var windows = getWindows();
+    for (var w = 0; w < windows.length; w++) {
+        rec(windows[w], 0, 'window[' + w + ']');
+        if (count >= maxNodes) break;
+    }
+    return count;
+}
+
+function textMatches(v, query) {
+    var q = String(query || '').toLowerCase();
+    if (!q) return true;
+    var node = summarizeView(v, '');
+    var haystack = [
+        node.class,
+        node.text,
+        node.title,
+        node.placeholder,
+        node.accessibility_label,
+        node.accessibility_identifier,
+        node.accessibility_value,
+        node.label
+    ].join(' ').toLowerCase();
+    return haystack.indexOf(q) !== -1;
+}
+
+function viewById(elementId) {
+    if (!elementId) return null;
+    try { return new ObjC.Object(ptr(elementId)); } catch (e) { return null; }
+}
+
+function bestMatch(query, includeHidden, maxDepth, maxNodes) {
+    var best = null;
+    var bestScore = -1;
+    walkViews(function(v) {
+        if (!textMatches(v, query)) return;
+        var node = summarizeView(v, '');
+        var score = 1;
+        if (node.visible) score += 5;
+        if (node.enabled) score += 2;
+        if (node.control) score += 3;
+        if (node.label && node.label.toLowerCase() === String(query).toLowerCase()) score += 5;
+        if (score > bestScore) {
+            best = v;
+            bestScore = score;
+        }
+    }, includeHidden, maxDepth, maxNodes);
+    return best;
+}
+
+function hitTestPoint(x, y) {
+    var windows = getWindows();
+    for (var i = windows.length - 1; i >= 0; i--) {
+        var w = windows[i];
+        if (!isVisible(w)) continue;
+        try {
+            var hit = w.hitTest_withEvent_([Number(x), Number(y)], ptr(0));
+            if (hit && !hit.isNull()) return hit;
+        } catch (e) {}
+    }
+    return null;
+}
+
+function activateView(v) {
+    if (!v) return {ok: false, error: 'no target view'};
+    var node = summarizeView(v, '');
+    try {
+        if (responds(v, 'accessibilityActivate') && v.accessibilityActivate()) {
+            return {ok: true, action: 'accessibilityActivate', target: node};
+        }
+    } catch (e) {}
+    try {
+        if (isControl(v)) {
+            v.sendActionsForControlEvents_(64); // UIControlEventTouchUpInside
+            return {ok: true, action: 'sendActionsForControlEvents:touchUpInside', target: node};
+        }
+    } catch (e) {}
+    try {
+        if (responds(v, 'becomeFirstResponder') && v.becomeFirstResponder()) {
+            return {ok: true, action: 'becomeFirstResponder', target: node};
+        }
+    } catch (e) {}
+    return {ok: false, error: 'target is not activatable by semantic UIKit APIs', target: node};
+}
+"""
+
+
+@mcp.tool()
+def flex_ui_tree(max_depth: int = 8, include_hidden: bool = False, max_nodes: int = 300, session_id: str = "") -> dict:
+    """Return a structured UIKit view hierarchy for autonomous navigation.
+
+    Nodes include a stable-enough object pointer id, class name, accessibility/text fields,
+    visibility/enabled state, and best-effort screen frame.
+    """
+    try:
+        _, session = _get_session(session_id)
+        max_depth = max(0, min(int(max_depth), 25))
+        max_nodes = max(1, min(int(max_nodes), 2000))
+        include_hidden_js = "true" if include_hidden else "false"
+        r = exec_js_main(session, f"""
+        {_UI_JS_HELPERS}
+        var nodesByPath = {{}};
+        var roots = [];
+        var total = walkViews(function(v, depth, path) {{
+            var node = summarizeView(v, path);
+            node.depth = depth;
+            node.children = [];
+            nodesByPath[path] = node;
+            var parentPath = path.substring(0, path.lastIndexOf('.'));
+            if (depth === 0) {{
+                roots.push(node);
+            }} else {{
+                var parent = nodesByPath[parentPath];
+                if (parent) parent.children.push(node);
+            }}
+        }}, {include_hidden_js}, {max_depth}, {max_nodes});
+        return JSON.stringify({{roots: roots, total_nodes: total, truncated: total >= {max_nodes}}});
+        """, timeout=20)
+        if r.get("ok"):
+            data = json.loads(r["result"])
+            return {"success": True, **data}
+        return {"success": False, "error": str(r)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def flex_ui_find(query: str = "", class_name: str = "", include_hidden: bool = False,
+                 max_depth: int = 8, limit: int = 20, session_id: str = "") -> dict:
+    """Find UIKit views by visible text, accessibility metadata, or class name."""
+    try:
+        tree = flex_ui_tree(max_depth=max_depth, include_hidden=include_hidden, max_nodes=1000, session_id=session_id)
+        if not tree.get("success"):
+            return tree
+        q = (query or "").lower()
+        cls = (class_name or "").lower()
+        matches = []
+
+        def visit(node):
+            haystack = " ".join(str(node.get(k, "")) for k in [
+                "class", "text", "title", "placeholder", "accessibility_label",
+                "accessibility_identifier", "accessibility_value", "label"
+            ]).lower()
+            class_ok = not cls or cls in str(node.get("class", "")).lower()
+            query_ok = not q or q in haystack
+            if class_ok and query_ok:
+                score = 0
+                if node.get("visible"):
+                    score += 5
+                if node.get("enabled"):
+                    score += 2
+                if node.get("control"):
+                    score += 3
+                if q and str(node.get("label", "")).lower() == q:
+                    score += 5
+                node_copy = dict(node)
+                node_copy.pop("children", None)
+                node_copy["score"] = score
+                matches.append(node_copy)
+            for child in node.get("children", []):
+                visit(child)
+
+        for root in tree.get("roots", []):
+            visit(root)
+        matches.sort(key=lambda n: n.get("score", 0), reverse=True)
+        limit = max(1, min(int(limit), 200))
+        return {"success": True, "count": min(len(matches), limit), "matches": matches[:limit]}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def flex_ui_tap(element_id: str = "", text: str = "", x: float = -1, y: float = -1,
+                include_hidden: bool = False, session_id: str = "") -> dict:
+    """Activate a UIKit view by element id, text query, or screen coordinate.
+
+    Prefers semantic actions (`accessibilityActivate`, UIControl touchUpInside) over raw
+    coordinate injection. Coordinates are used to hit-test a view, then activate it.
+    """
+    try:
+        _, session = _get_session(session_id)
+        element_id_j = json.dumps(element_id or "")
+        text_j = json.dumps(text or "")
+        include_hidden_js = "true" if include_hidden else "false"
+        r = exec_js_main(session, f"""
+        {_UI_JS_HELPERS}
+        var target = null;
+        var mode = 'none';
+        if ({element_id_j}) {{
+            target = viewById({element_id_j});
+            mode = 'element_id';
+        }} else if ({text_j}) {{
+            target = bestMatch({text_j}, {include_hidden_js}, 10, 1000);
+            mode = 'text';
+        }} else if ({float(x)} >= 0 && {float(y)} >= 0) {{
+            target = hitTestPoint({float(x)}, {float(y)});
+            mode = 'coordinate';
+        }}
+        var result = activateView(target);
+        result.mode = mode;
+        return JSON.stringify(result);
+        """, timeout=10)
+        if r.get("ok"):
+            data = json.loads(r["result"])
+            return {"success": data.get("ok", False), **data}
+        return {"success": False, "error": str(r)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def flex_ui_type_text(element_id: str = "", text: str = "", query: str = "", clear: bool = True,
+                      session_id: str = "") -> dict:
+    """Set or insert text into a text input view by element id or semantic query."""
+    try:
+        _, session = _get_session(session_id)
+        element_id_j = json.dumps(element_id or "")
+        query_j = json.dumps(query or "")
+        text_j = json.dumps(text or "")
+        clear_js = "true" if clear else "false"
+        r = exec_js_main(session, f"""
+        {_UI_JS_HELPERS}
+        var target = {element_id_j} ? viewById({element_id_j}) : bestMatch({query_j}, false, 10, 1000);
+        if (!target) return JSON.stringify({{ok: false, error: 'no target text input'}});
+        var before = callStr(target, 'text', 'text');
+        var finalText = {clear_js} ? {text_j} : before + {text_j};
+        var ns = ObjC.classes.NSString.stringWithString_(finalText);
+        var didSet = false;
+        try {{ if (responds(target, 'becomeFirstResponder')) target.becomeFirstResponder(); }} catch (e) {{}}
+        try {{
+            if (responds(target, 'setText:')) {{
+                target.setText_(ns);
+                didSet = true;
+            }}
+        }} catch (e) {{}}
+        if (!didSet) {{
+            try {{
+                if (responds(target, 'insertText:')) {{
+                    target.insertText_(ns);
+                    didSet = true;
+                }}
+            }} catch (e) {{}}
+        }}
+        if (didSet && isControl(target)) {{
+            try {{ target.sendActionsForControlEvents_(131072); }} catch (e) {{}} // UIControlEventEditingChanged
+        }}
+        var node = summarizeView(target, '');
+        node.before = before;
+        node.after = callStr(target, 'text', 'text');
+        return JSON.stringify({{ok: didSet, target: node, action: didSet ? 'setText/insertText' : 'unsupported'}});
+        """, timeout=10)
+        if r.get("ok"):
+            data = json.loads(r["result"])
+            return {"success": data.get("ok", False), **data}
+        return {"success": False, "error": str(r)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+def flex_ui_scroll(element_id: str = "", direction: str = "down", amount: float = 0.75,
+                   session_id: str = "") -> dict:
+    """Scroll a UIScrollView by id, or the first visible scroll view if no id is provided."""
+    try:
+        _, session = _get_session(session_id)
+        element_id_j = json.dumps(element_id or "")
+        direction_j = json.dumps((direction or "down").lower())
+        amount = max(0.05, min(float(amount), 5.0))
+        r = exec_js_main(session, f"""
+        {_UI_JS_HELPERS}
+        var target = {element_id_j} ? viewById({element_id_j}) : null;
+        if (!target) {{
+            walkViews(function(v) {{
+                if (!target && isVisible(v) && isScrollView(v)) target = v;
+            }}, false, 10, 1000);
+        }}
+        if (!target) return JSON.stringify({{ok: false, error: 'no scroll view found'}});
+        if (!isScrollView(target)) return JSON.stringify({{ok: false, error: 'target is not UIScrollView', target: summarizeView(target, '')}});
+        var offset = pointToObj(target.contentOffset());
+        var bounds = rectToObj(target.bounds());
+        var content = sizeToObj(target.contentSize());
+        var dx = 0, dy = 0;
+        var amt = {amount};
+        var page = Math.max(1, bounds.height || bounds.width || 1) * amt;
+        var dir = {direction_j};
+        if (dir === 'up') dy = -page;
+        else if (dir === 'left') dx = -page;
+        else if (dir === 'right') dx = page;
+        else dy = page;
+        var newX = Math.max(0, Math.min(Math.max(0, content.width - bounds.width), offset.x + dx));
+        var newY = Math.max(0, Math.min(Math.max(0, content.height - bounds.height), offset.y + dy));
+        target.setContentOffset_animated_([newX, newY], true);
+        return JSON.stringify({{ok: true, action: 'setContentOffset', before: offset, after: {{x: newX, y: newY}}, target: summarizeView(target, '')}});
         """, timeout=10)
         if r.get("ok"):
             data = json.loads(r["result"])

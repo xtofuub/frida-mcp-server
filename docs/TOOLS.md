@@ -23,6 +23,16 @@ Use these tools only on apps and devices you own or are authorized to test.
 | `flex_app_info` | Return bundle id, version, build, paths, and runtime context. |
 | `flex_modules(search, limit)` | List loaded Mach-O modules. |
 
+## UI Automation
+
+| Tool | Purpose |
+| --- | --- |
+| `flex_ui_tree(max_depth, include_hidden, max_nodes)` | Return a structured UIKit view tree with object ids, class names, text/accessibility fields, visible/enabled state, and best-effort screen frames. |
+| `flex_ui_find(query, class_name, include_hidden, max_depth, limit)` | Find UI elements by text, accessibility metadata, placeholder, title, or class name. |
+| `flex_ui_tap(element_id, text, x, y, include_hidden)` | Activate an element by id, text query, or coordinate hit-test. Uses semantic UIKit actions when possible. |
+| `flex_ui_type_text(element_id, text, query, clear)` | Set or insert text into a text input found by id or semantic query. |
+| `flex_ui_scroll(element_id, direction, amount)` | Scroll a specific `UIScrollView`, or the first visible scroll view if no id is provided. |
+
 ## Network Capture
 
 | Tool | Purpose |
@@ -125,6 +135,21 @@ flex_network(true)
 # Use the app.
 flex_requests(count=100)
 flex_scan_vulnerabilities(count=100)
+```
+
+### Navigate UI And Watch Traffic
+
+```text
+flex_connect("com.example.app")
+flex_network(true)
+flex_ui_tree(max_depth=8)
+flex_ui_find(query="login")
+flex_ui_tap(text="Login")
+flex_ui_type_text(query="email", text="researcher@example.com")
+flex_ui_type_text(query="password", text="<test-password>")
+flex_ui_tap(text="Sign In")
+flex_monitor()
+flex_scan_vulnerabilities(count=200)
 ```
 
 ### Replay A Request With Different Auth
