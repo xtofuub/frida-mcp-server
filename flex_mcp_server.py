@@ -36,8 +36,7 @@ def get_usb_device():
 
 def session_alive(session):
     try:
-        session.is_detached()
-        return True
+        return not bool(session.is_detached)
     except Exception:
         return False
 
