@@ -36,7 +36,6 @@ const dryRun = commandArgs.includes('--dry-run');
 const noConfig = commandArgs.includes('--no-config');
 const noSkills = commandArgs.includes('--no-skills');
 const installClaudeCode = commandArgs.includes('--claude-code');
-const fromPostinstall = commandArgs.includes('--from-postinstall');
 
 function printHelp() {
   console.log(`flex-mcp-server
@@ -66,7 +65,6 @@ Options:
 
 Environment:
   FLEX_MCP_PYTHON             Python command used by generated MCP configs. Default: ${PYTHON}
-  FLEX_MCP_SKIP_AUTO_INSTALL  Set to 1 to disable npm postinstall auto-registration.
 `);
 }
 
@@ -502,11 +500,6 @@ function registerMcpConfigs() {
 }
 
 function install() {
-  if (fromPostinstall && process.env.FLEX_MCP_SKIP_AUTO_INSTALL === '1') {
-    console.log('flex-mcp-server: npm postinstall auto-registration skipped by FLEX_MCP_SKIP_AUTO_INSTALL=1');
-    return;
-  }
-
   if (!noSkills) installSkills();
   if (!noConfig) registerMcpConfigs();
 

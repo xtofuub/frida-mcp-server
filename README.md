@@ -8,12 +8,12 @@ Use this only on apps, devices, and programs where you have explicit authorizati
 
 ## Quick Install
 
-After you have installed the required Python packages yourself, install the npm package. The npm `postinstall` step runs `flex-mcp-server install` automatically, which installs the bundled skill and registers the MCP server for detected clients. If your npm environment blocks lifecycle scripts, run `flex-mcp-server install` manually after the package install finishes.
+After you have installed the required Python packages yourself, install the npm package and run the installer. The installer copies the bundled skill and registers the MCP server for detected clients.
 
 ### All Detected Clients
 
 ```bash
-npm install -g github:xtofuub/flex-mcp-server
+npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
 ```
 
 ### Agent Presets
@@ -22,43 +22,49 @@ Use one of these when you want to force setup for a specific agent, even on a fr
 
 | Agent | macOS/Linux one-liner |
 | --- | --- |
-| Claude Code | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server register --claude-code` |
-| Claude Desktop | `mkdir -p "$HOME/Library/Application Support/Claude" && npm install -g github:xtofuub/flex-mcp-server` |
-| OpenCode | `mkdir -p ~/.opencode && npm install -g github:xtofuub/flex-mcp-server` |
-| Cursor | `mkdir -p ~/.cursor && npm install -g github:xtofuub/flex-mcp-server` |
-| Codex | `mkdir -p ~/.codex && npm install -g github:xtofuub/flex-mcp-server` |
+| Claude Code | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install --claude-code` |
+| Claude Desktop | `mkdir -p "$HOME/Library/Application Support/Claude" && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+| OpenCode | `mkdir -p ~/.opencode && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+| Cursor | `mkdir -p ~/.cursor && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+| Codex | `mkdir -p ~/.codex && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+
+Windows Command Prompt:
+
+```cmd
+npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
+```
 
 Windows PowerShell presets:
 
 ```powershell
 # Claude Desktop
-New-Item -ItemType Directory -Force "$env:APPDATA\Claude"; npm install -g github:xtofuub/flex-mcp-server
+New-Item -ItemType Directory -Force "$env:APPDATA\Claude"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # OpenCode
-New-Item -ItemType Directory -Force "$HOME\.opencode"; npm install -g github:xtofuub/flex-mcp-server
+New-Item -ItemType Directory -Force "$HOME\.opencode"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # Cursor
-New-Item -ItemType Directory -Force "$HOME\.cursor"; npm install -g github:xtofuub/flex-mcp-server
+New-Item -ItemType Directory -Force "$HOME\.cursor"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # Codex
-New-Item -ItemType Directory -Force "$HOME\.codex"; npm install -g github:xtofuub/flex-mcp-server
+New-Item -ItemType Directory -Force "$HOME\.codex"; npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install }
 
 # Claude Code
-npm install -g github:xtofuub/flex-mcp-server; flex-mcp-server register --claude-code
+npm install -g github:xtofuub/flex-mcp-server; if ($LASTEXITCODE -eq 0) { flex-mcp-server install --claude-code }
 ```
 
 On Linux, Claude Desktop-style config uses `~/.config/Claude` instead of the macOS Application Support path:
 
 ```bash
-mkdir -p ~/.config/Claude && npm install -g github:xtofuub/flex-mcp-server
+mkdir -p ~/.config/Claude && npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
 ```
 
 ### Any MCP client
 
-If npm scripts were disabled or postinstall printed a fallback message, rerun the installer manually:
+If you installed the package but skipped the installer, run:
 
 ```bash
-npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
+flex-mcp-server install
 ```
 
 The installer writes config entries for detected supported clients and also prints the exact stdio MCP config for manual setup:
@@ -74,10 +80,10 @@ The installer writes config entries for detected supported clients and also prin
 }
 ```
 
-To install the package without touching local agent folders or MCP configs:
+To install the package without touching local agent folders or MCP configs, only run the npm half:
 
 ```bash
-FLEX_MCP_SKIP_AUTO_INSTALL=1 npm install -g github:xtofuub/flex-mcp-server
+npm install -g github:xtofuub/flex-mcp-server
 ```
 
 If your system uses `python3` instead of `python`, set the launcher before running the installer:
@@ -114,7 +120,7 @@ Clone the repo and run the installer from source:
 ```bash
 git clone https://github.com/xtofuub/flex-mcp-server.git
 cd flex-mcp-server
-FLEX_MCP_SKIP_AUTO_INSTALL=1 npm install
+npm install
 node bin/cli.js install
 ```
 
@@ -373,7 +379,6 @@ flex_trace_logs(clear=true)
 |-- skills/                     # Bundled agent skill and references
 |-- flex_mcp_server.py          # Python FastMCP server
 |-- mcp.config.example.jsonc    # Example stdio MCP config
-|-- postinstall.js              # Best-effort npm auto-registration entrypoint
 |-- package.json                # npm package metadata
 `-- README.md
 ```
@@ -390,7 +395,7 @@ Common fixes:
 
 - `No USB device found`: start `frida-server` on the device and confirm USB pairing.
 - `ModuleNotFoundError: frida` or `mcp`: install those packages into the Python environment used by `flex-mcp-server`; choose Frida versions that match your device-side Frida setup.
-- `Cannot find module ... bin\cli.js` during npm install: reinstall the latest GitHub package and then run `flex-mcp-server install`; the current package uses a safer root `postinstall.js` entrypoint.
+- `Cannot find module ... bin\cli.js` from an older failed install: remove the broken global package folder and command shims, reinstall, then run `flex-mcp-server install`.
 - MCP client starts but no tools appear: confirm the client config points to `flex-mcp-server serve` or to the absolute `flex_mcp_server.py` path printed by `flex-mcp-server config`.
 - FLEX toolbar tools fail: install FLEX/FLEXing in the target app. Frida-only tools still work without FLEX.
 

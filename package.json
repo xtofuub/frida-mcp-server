@@ -1,6 +1,6 @@
 {
   "name": "flex-mcp-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP server for iOS app inspection with FLEX and Frida.",
   "bin": {
     "flex-mcp-server": "./bin/cli.js"
@@ -11,12 +11,10 @@
     "skills/",
     "flex_mcp_server.py",
     "mcp.config.example.jsonc",
-    "postinstall.js",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "postinstall": "node postinstall.js",
     "start": "node bin/cli.js serve",
     "install:mcp": "node bin/cli.js install",
     "register": "node bin/cli.js register",
