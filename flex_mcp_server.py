@@ -254,7 +254,11 @@ def connect(bundle_id: str) -> dict:
             pid = device.spawn([bundle_id])
             session = device.attach(pid)
             device.resume(pid)
-            time.sleep(3)
+            time.sleep(5)
+            if not session_alive(session):
+                try: session.detach()
+                except Exception: pass
+                raise RuntimeError("App crashed after spawn (session died)")
             method = "spawn"
 
         sid = "flex_" + bundle_id + "_" + str(int(time.time()))
@@ -262,6 +266,8 @@ def connect(bundle_id: str) -> dict:
             _sessions[sid] = session
 
         net_ack = _install_network_capture(sid, session)
+        if not net_ack.get("ok"):
+            log.warning("Network capture install: %s", net_ack.get("error", "unknown"))
 
         return {
             "success": True, "session_id": sid, "method": method,
@@ -371,6 +377,8 @@ def info(session_id: str = "") -> dict:
 
 _NETWORK_CAPTURE_JS = r"""
 (function(){
+    if (!ObjC.available) { send({__hook_init: true, ok: false, error: 'ObjC not available'}); return; }
+    ObjC.schedule(ObjC.mainQueue, function() {
     var transactions = [];
     var maxTxns = 5000;
     var bodyCache = {};
@@ -488,6 +496,7 @@ _NETWORK_CAPTURE_JS = r"""
         }
     } catch(e) {}
 
+    });
     rpc.exports = {
         getTransactions: function(count) {
             var c = Math.min(count || 50, transactions.length);
@@ -505,6 +514,8 @@ def _install_network_capture(sid, session):
     state = _intercept_rules.get(sid, {})
     if state.get("net_script"):
         return {"ok": True}
+    if not session_alive(session):
+        return {"ok": False, "error": "session dead before hook install"}
     ack_event = threading.Event()
     ack = {"ok": False, "error": ""}
 
@@ -517,21 +528,32 @@ def _install_network_capture(sid, session):
             ack["error"] = p.get("error", "")
             ack_event.set()
 
-    try:
-        script = session.create_script(_NETWORK_CAPTURE_JS)
-        script.on("message", on_msg)
-        script.load()
-        ack_event.wait(5)
-        if not ack["ok"]:
-            try:
-                script.unload()
-            except Exception:
-                pass
-            return ack
-        _intercept_rules.setdefault(sid, {})["net_script"] = script
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-    return ack
+    for attempt in range(3):
+        try:
+            script = session.create_script(_NETWORK_CAPTURE_JS)
+            script.on("message", on_msg)
+            script.load()
+            ack_event.wait(10)
+            if ack.get("ok"):
+                _intercept_rules.setdefault(sid, {})["net_script"] = script
+                return ack
+            if ack.get("error"):
+                try: script.unload()
+                except Exception: pass
+                log.warning("net hook attempt %d: %s", attempt + 1, ack.get("error"))
+                if attempt < 2:
+                    time.sleep(1)
+                    continue
+                return ack
+            try: script.unload()
+            except Exception: pass
+        except Exception as e:
+            log.warning("net hook attempt %d exception: %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(1)
+                continue
+            return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "all attempts failed"}
 
 
 # ── Network tools ───────────────────────────────────────────────────────
@@ -1924,10 +1946,12 @@ _SSL_UNPIN_JS = r"""
         if (SSLSetPeerDomainName) { Interceptor.attach(SSLSetPeerDomainName, { onLeave: function(retval) { retval.replace(0); } }); installed.push('SSLSetPeerDomainName'); }
         var tls_helper = Module.findExportByName(null, 'tls_helper_create_peer_trust');
         if (tls_helper) { Interceptor.attach(tls_helper, { onLeave: function(retval) { retval.replace(0); } }); installed.push('tls_helper_create_peer_trust'); }
-        if (ObjC.classes.AFSecurityPolicy) {
-            var evalM = ObjC.classes.AFSecurityPolicy['- evaluateServerTrust:forDomain:'];
-            if (evalM) { Interceptor.attach(evalM.implementation, { onLeave: function(retval) { retval.replace(ptr(1)); } }); installed.push('AFSecurityPolicy'); }
-        }
+        ObjC.schedule(ObjC.mainQueue, function() {
+            if (ObjC.classes.AFSecurityPolicy) {
+                var evalM = ObjC.classes.AFSecurityPolicy['- evaluateServerTrust:forDomain:'];
+                if (evalM) { Interceptor.attach(evalM.implementation, { onLeave: function(retval) { retval.replace(ptr(1)); } }); installed.push('AFSecurityPolicy'); }
+            }
+        });
         send({__hook_init: true, ok: true, installed: installed});
     } catch(e) { send({__hook_init: true, ok: false, error: e.message}); }
 })();
@@ -1936,6 +1960,7 @@ _SSL_UNPIN_JS = r"""
 
 _JB_BYPASS_JS = r"""
 (function(){
+    ObjC.schedule(ObjC.mainQueue, function() {
     try {
         var jbPaths = ['/Applications/Cydia.app','/Applications/Sileo.app','/Applications/Zebra.app',
             '/Library/MobileSubstrate','/usr/sbin/sshd','/etc/apt','/private/var/lib/apt',
@@ -1961,6 +1986,7 @@ _JB_BYPASS_JS = r"""
         if (forkFn) Interceptor.replace(forkFn, new NativeCallback(function(){ return -1; }, 'int', []));
         send({__hook_init: true, ok: true});
     } catch(e) { send({__hook_init: true, ok: false, error: e.message}); }
+    });
 })();
 """
 
@@ -2153,10 +2179,11 @@ def call(target: str, selector: str, args: list = None, session_id: str = "") ->
 @mcp.tool()
 def trace(class_name: str, selector: str, session_id: str = "") -> dict:
     """Hook an ObjC method and buffer call/return events."""
+    global _trace_counter
     try:
         sid, session = _get_session(session_id)
-        _trace_counter[0] += 1
-        hook_id = "hook_" + str(_trace_counter[0])
+        _trace_counter += 1
+        hook_id = "hook_" + str(_trace_counter)
         events = []
         init_ack = {"ok": False, "error": ""}
         ack_event = threading.Event()
