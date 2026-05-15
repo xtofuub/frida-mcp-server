@@ -470,7 +470,9 @@ _NETWORK_CAPTURE_JS = r"""
                 try { txn.error = String(errorObj.localizedDescription()); } catch(e) {}
             }
             txn.duration_ms = Date.now() - txn.timestamp;
-            pushTxn(txn);
+            // txn is already in transactions (pushed from resume hook).
+            // If it was a late-discovered task not in pending, push it now.
+            if (!pending[key]) pushTxn(txn);
             delete pending[key];
         } catch(e) {}
     }
@@ -507,7 +509,10 @@ _NETWORK_CAPTURE_JS = r"""
                                     try { req = task.originalRequest ? task.originalRequest() : null; } catch(e) {}
                                 }
                                 var txn = snapshotRequest(req);
-                                if (txn) pending[key] = txn;
+                                if (txn) {
+                                    pushTxn(txn);
+                                    pending[key] = txn;
+                                }
                             } catch(e) {}
                         }
                     });
