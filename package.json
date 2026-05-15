@@ -1,7 +1,7 @@
 {
   "name": "flex-mcp-server",
   "version": "1.1.0",
-  "description": "MCP server for iOS app inspection with FLEX and Frida.",
+  "description": "MCP server for iOS app inspection with Frida — zero FLEX dependency.",
   "bin": {
     "flex-mcp-server": "./bin/cli.js"
   },
@@ -30,7 +30,6 @@
     "frida",
     "frida-ios-dump",
     "ios",
-    "flex",
     "reverse-engineering",
     "mobile-security",
     "pentest"
