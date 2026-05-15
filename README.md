@@ -396,6 +396,7 @@ Common fixes:
 - `No USB device found`: start `frida-server` on the device and confirm USB pairing.
 - `ModuleNotFoundError: frida` or `mcp`: install those packages into the Python environment used by `flex-mcp-server`; choose Frida versions that match your device-side Frida setup.
 - `Cannot find module ... bin\cli.js` from an older failed install: remove the broken global package folder and command shims, reinstall, then run `flex-mcp-server install`.
+- `FastMCP.run() got an unexpected keyword argument 'host'`: upgrade to the latest GitHub package. SSE host and port are now applied through FastMCP settings before `run()`.
 - MCP client starts but no tools appear: confirm the client config points to `flex-mcp-server serve` or to the absolute `flex_mcp_server.py` path printed by `flex-mcp-server config`.
 - FLEX toolbar tools fail: install FLEX/FLEXing in the target app. Frida-only tools still work without FLEX.
 

@@ -543,7 +543,7 @@ function serve() {
 
   const child = spawn(PYTHON, [SERVER_PATH, ...commandArgs], {
     stdio: 'inherit',
-    shell: process.platform === 'win32',
+    shell: false,
   });
 
   child.on('error', (error) => {
@@ -577,7 +577,7 @@ function doctor() {
 
   const py = spawnSync(PYTHON, ['-c', 'import sys; print(sys.version.split()[0])'], {
     encoding: 'utf8',
-    shell: process.platform === 'win32',
+    shell: false,
   });
   check('python executable', py.status === 0, PYTHON);
   if (py.status === 0) {
@@ -586,7 +586,7 @@ function doctor() {
 
   const packages = spawnSync(PYTHON, ['-c', 'import frida, mcp; print("frida and mcp import OK")'], {
     encoding: 'utf8',
-    shell: process.platform === 'win32',
+    shell: false,
   });
   check('python packages', packages.status === 0, 'requires frida and mcp');
   if (packages.status === 0) {

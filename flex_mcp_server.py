@@ -3283,8 +3283,12 @@ def main():
     args = parser.parse_args()
 
     if args.transport == "sse":
+        settings = getattr(mcp, "settings", None)
+        if settings is not None:
+            settings.host = args.host
+            settings.port = args.port
         print(f"FLEX MCP Server running on http://{args.host}:{args.port}/sse")
-        mcp.run(transport="sse", host=args.host, port=args.port)
+        mcp.run(transport="sse")
     else:
         mcp.run()
 
