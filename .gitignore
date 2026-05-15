@@ -5,10 +5,21 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.venv/
+venv/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local agent state
+.claude/
 
 # FLEXing source (not part of this project)
 FLEXing/

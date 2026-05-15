@@ -1,0 +1,46 @@
+{
+  "name": "flex-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for iOS app inspection with FLEX and Frida.",
+  "bin": {
+    "flex-mcp-server": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "docs/",
+    "skills/",
+    "flex_mcp_server.py",
+    "mcp.config.example.jsonc",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node bin/cli.js serve",
+    "install:mcp": "node bin/cli.js install",
+    "config": "node bin/cli.js config",
+    "doctor": "node bin/cli.js doctor"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "frida",
+    "frida-ios-dump",
+    "ios",
+    "flex",
+    "reverse-engineering",
+    "mobile-security",
+    "pentest"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xtofuub/flex-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xtofuub/flex-mcp-server/issues"
+  },
+  "homepage": "https://github.com/xtofuub/flex-mcp-server#readme",
+  "license": "MIT"
+}
