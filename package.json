@@ -1,14 +1,14 @@
 {
-  "name": "flex-mcp-server",
+  "name": "frida-mcp-server",
   "version": "1.2.0",
   "description": "MCP server for iOS app inspection with Frida — zero FLEX dependency.",
   "bin": {
-    "flex-mcp-server": "./bin/cli.js"
+    "frida-mcp-server": "./bin/cli.js"
   },
   "files": [
     "bin/",
     "skills/",
-    "flex_mcp_server.py",
+    "frida_mcp_server.py",
     "mcp.config.example.jsonc",
     "README.md",
     "LICENSE"
@@ -35,11 +35,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xtofuub/flex-mcp-server.git"
+    "url": "git+https://github.com/xtofuub/frida-mcp-server.git"
   },
   "bugs": {
-    "url": "https://github.com/xtofuub/flex-mcp-server/issues"
+    "url": "https://github.com/xtofuub/frida-mcp-server/issues"
   },
-  "homepage": "https://github.com/xtofuub/flex-mcp-server#readme",
+  "homepage": "https://github.com/xtofuub/frida-mcp-server#readme",
   "license": "MIT"
 }

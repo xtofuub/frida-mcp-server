@@ -53,13 +53,13 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
                            │ MCP stdio transport
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    flex-mcp-server (Node.js CLI)             │
+│                    frida-mcp-server (Node.js CLI)             │
 │                  bin/cli.js — install / serve / doctor       │
 └──────────────────────────┬──────────────────────────────────┘
                            │ spawns
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│               flex_mcp_server.py (Python MCP Server)         │
+│               frida_mcp_server.py (Python MCP Server)         │
 │    • 64 MCP tools with short names                           │
 │    • Session management with health checks                   │
 │    • JS execution engine with ObjC.schedule(mainQueue)       │
@@ -89,7 +89,7 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
 ## Quick Install
 
 ```bash
-npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install
+npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install
 ```
 
 This installs the CLI globally, copies bundled skills to detected agent directories, and registers MCP configurations for supported clients.
@@ -102,17 +102,17 @@ This installs the CLI globally, copies bundled skills to detected agent director
 
 ```bash
 # From GitHub (latest)
-npm install -g github:xtofuub/flex-mcp-server
+npm install -g github:xtofuub/frida-mcp-server
 
 # From local clone
-cd flex-mcp-server
+cd frida-mcp-server
 npm install -g .
 ```
 
 ### 2. Run the Installer
 
 ```bash
-flex-mcp-server install
+frida-mcp-server install
 ```
 
 The installer will:
@@ -123,7 +123,7 @@ The installer will:
 ### 3. Verify Setup
 
 ```bash
-flex-mcp-server doctor
+frida-mcp-server doctor
 ```
 
 This checks:
@@ -153,11 +153,11 @@ iproxy 27042 27042 &
 
 | Agent | Command |
 | --- | --- |
-| Claude Code | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install --claude-code` |
-| Claude Desktop | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
-| OpenCode | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
-| Cursor | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
-| Codex | `npm install -g github:xtofuub/flex-mcp-server && flex-mcp-server install` |
+| Claude Code | `npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install --claude-code` |
+| Claude Desktop | `npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install` |
+| OpenCode | `npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install` |
+| Cursor | `npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install` |
+| Codex | `npm install -g github:xtofuub/frida-mcp-server && frida-mcp-server install` |
 
 ---
 
@@ -185,13 +185,13 @@ iproxy 27042 27042 &
 
 | Command | What it does |
 | --- | --- |
-| `flex-mcp-server install` | Install bundled skills + register MCP configs for detected clients |
-| `flex-mcp-server register` | Register MCP configs without copying skills |
-| `flex-mcp-server serve` | Start the Python MCP server over stdio |
-| `flex-mcp-server config` | Print the stdio MCP configuration JSON |
-| `flex-mcp-server path` | Print the absolute path to `flex_mcp_server.py` |
-| `flex-mcp-server doctor` | Check local runtime prerequisites |
-| `flex-mcp-server help` | Show help text |
+| `frida-mcp-server install` | Install bundled skills + register MCP configs for detected clients |
+| `frida-mcp-server register` | Register MCP configs without copying skills |
+| `frida-mcp-server serve` | Start the Python MCP server over stdio |
+| `frida-mcp-server config` | Print the stdio MCP configuration JSON |
+| `frida-mcp-server path` | Print the absolute path to `frida_mcp_server.py` |
+| `frida-mcp-server doctor` | Check local runtime prerequisites |
+| `frida-mcp-server help` | Show help text |
 
 ### Install Options
 
@@ -207,7 +207,7 @@ iproxy 27042 27042 &
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `FLEX_MCP_PYTHON` | Python executable used by MCP configs | `python` (win32) / `python3` (other) |
+| `FRIDA_MCP_PYTHON` | Python executable used by MCP configs | `python` (win32) / `python3` (other) |
 
 ---
 
@@ -220,8 +220,8 @@ Add this to your agent's MCP configuration:
 ```json
 {
   "mcpServers": {
-    "frida-flex": {
-      "command": "flex-mcp-server",
+    "frida": {
+      "command": "frida-mcp-server",
       "args": ["serve"]
     }
   }
@@ -233,9 +233,9 @@ Add this to your agent's MCP configuration:
 ```jsonc
 {
   "mcp": {
-    "frida-flex": {
+    "frida": {
       "type": "local",
-      "command": ["python3", "flex_mcp_server.py"],
+      "command": ["python3", "frida_mcp_server.py"],
       "enabled": true
     }
   }
@@ -245,7 +245,7 @@ Add this to your agent's MCP configuration:
 ### SSE Transport (Remote)
 
 ```bash
-flex-mcp-server serve --transport sse --port 8099
+frida-mcp-server serve --transport sse --port 8099
 ```
 
 ---
@@ -425,7 +425,7 @@ The package includes an **iOS Advanced Dynamic Pentest Skill** that teaches agen
 - Traffic analysis methodology
 - Reporting standards for high-impact findings
 
-The skill is automatically installed to detected agent directories during `flex-mcp-server install`.
+The skill is automatically installed to detected agent directories during `frida-mcp-server install`.
 
 ---
 
@@ -469,7 +469,7 @@ trace(class_name="<ClassName>", selector="<selector>")
 
 ```bash
 pip install --upgrade frida frida-tools mcp
-flex-mcp-server doctor
+frida-mcp-server doctor
 ```
 
 ---
@@ -477,14 +477,14 @@ flex-mcp-server doctor
 ## Repository Layout
 
 ```
-flex-mcp-server/
+frida-mcp-server/
 ├── bin/
 │   └── cli.js                  # Node.js CLI wrapper (install, serve, doctor, etc.)
 ├── skills/
 │   └── ios-advanced-pentest/
 │       └── SKILL.md            # Bundled pentest methodology skill
 ├── docs/                       # Additional documentation
-├── flex_mcp_server.py          # Python MCP server (pure Frida, 64 tools)
+├── frida_mcp_server.py          # Python MCP server (pure Frida, 64 tools)
 ├── TOOLS.md                    # Complete tool reference with examples
 ├── README.md                   # This file
 ├── package.json                # npm package manifest

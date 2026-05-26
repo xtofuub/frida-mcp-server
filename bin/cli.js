@@ -7,15 +7,15 @@ const { spawn, spawnSync } = require('child_process');
 
 const PKG_ROOT = path.resolve(__dirname, '..');
 const SKILLS_ROOT = path.join(PKG_ROOT, 'skills');
-const SERVER_PATH = path.join(PKG_ROOT, 'flex_mcp_server.py');
+const SERVER_PATH = path.join(PKG_ROOT, 'frida_mcp_server.py');
 const CLI_PATH = path.join(PKG_ROOT, 'bin', 'cli.js');
 const HOME = os.homedir();
 const APPDATA = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
 const XDG_CONFIG_HOME = process.env.XDG_CONFIG_HOME || path.join(HOME, '.config');
 const OPENCODE_CONFIG_DIR = path.join(XDG_CONFIG_HOME, 'opencode');
 const OPENCODE_LEGACY_DIR = path.join(HOME, '.opencode');
-const PYTHON = process.env.FLEX_MCP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-const SERVER_NAME = 'frida-flex';
+const PYTHON = process.env.FRIDA_MCP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+const SERVER_NAME = 'frida';
 
 const AGENTS = {
   'Claude Code': path.join(HOME, '.claude'),
@@ -39,22 +39,22 @@ const noSkills = commandArgs.includes('--no-skills');
 const installClaudeCode = commandArgs.includes('--claude-code');
 
 function printHelp() {
-  console.log(`flex-mcp-server
+  console.log(`frida-mcp-server
 
 Usage:
-  flex-mcp-server install [--force] [--no-config] [--no-skills] [--claude-code]
-  flex-mcp-server register [--claude-code]
-  flex-mcp-server serve [server args...]
-  flex-mcp-server config
-  flex-mcp-server path
-  flex-mcp-server doctor
+  frida-mcp-server install [--force] [--no-config] [--no-skills] [--claude-code]
+  frida-mcp-server register [--claude-code]
+  frida-mcp-server serve [server args...]
+  frida-mcp-server config
+  frida-mcp-server path
+  frida-mcp-server doctor
 
 Commands:
   install        Install bundled skills and register MCP configs for detected clients.
   register       Register MCP configs without copying skills.
   serve          Start the Python MCP server over stdio. Pass server args after serve.
   config         Print the stdio MCP config for this install.
-  path           Print the absolute path to flex_mcp_server.py.
+  path           Print the absolute path to frida_mcp_server.py.
   doctor         Check local runtime prerequisites.
 
 Options:
@@ -65,7 +65,7 @@ Options:
   --dry-run      Show what would be installed or configured without writing files.
 
 Environment:
-  FLEX_MCP_PYTHON             Python command used by generated MCP configs. Default: ${PYTHON}
+  FRIDA_MCP_PYTHON             Python command used by generated MCP configs. Default: ${PYTHON}
 `);
 }
 
@@ -264,11 +264,11 @@ function tomlString(value) {
 
 function getCodexTomlBlock() {
   return [
-    '# flex-mcp-server start',
+    '# frida-mcp-server start',
     `[mcp_servers.${SERVER_NAME}]`,
     `command = ${tomlString(PYTHON)}`,
     `args = [${tomlString(SERVER_PATH)}]`,
-    '# flex-mcp-server end',
+    '# frida-mcp-server end',
     '',
   ].join('\n');
 }
@@ -276,8 +276,8 @@ function getCodexTomlBlock() {
 function mergeCodexToml(filePath) {
   const block = getCodexTomlBlock();
   const content = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
-  const markerPattern = /# flex-mcp-server start[\s\S]*?# flex-mcp-server end\n?/m;
-  const tablePattern = /^\[mcp_servers\.frida-flex\][\s\S]*?(?=^\[|$(?![\s\S]))/m;
+  const markerPattern = /# frida-mcp-server start[\s\S]*?# frida-mcp-server end\n?/m;
+  const tablePattern = /^\[mcp_servers\.frida\][\s\S]*?(?=^\[|$(?![\s\S]))/m;
   let next;
 
   if (markerPattern.test(content)) {
@@ -338,7 +338,7 @@ function installSkills() {
     process.exit(1);
   }
 
-  console.log(`\nflex-mcp-server: ${dryRun ? 'checking' : 'installing'} ${skills.length} bundled skill(s)\n`);
+  console.log(`\nfrida-mcp-server: ${dryRun ? 'checking' : 'installing'} ${skills.length} bundled skill(s)\n`);
 
   let touchedAgents = 0;
   let totalInstalled = 0;
@@ -451,7 +451,7 @@ function installClaudeCodeMcp() {
       attempted: true,
       configured: false,
       skipped: true,
-      message: 'claude CLI not found; run: claude mcp add frida-flex flex-mcp-server serve',
+      message: 'claude CLI not found; run: claude mcp add frida frida-mcp-server serve',
     };
   }
 
@@ -459,13 +459,13 @@ function installClaudeCodeMcp() {
     return {
       attempted: true,
       configured: true,
-      message: 'would run: claude mcp add frida-flex flex-mcp-server serve',
+      message: 'would run: claude mcp add frida frida-mcp-server serve',
     };
   }
 
   const result = spawnSync(
     'claude',
-    ['mcp', 'add', SERVER_NAME, 'flex-mcp-server', 'serve'],
+    ['mcp', 'add', SERVER_NAME, 'frida-mcp-server', 'serve'],
     { encoding: 'utf8', shell: process.platform === 'win32' },
   );
 
@@ -483,7 +483,7 @@ function installClaudeCodeMcp() {
 }
 
 function registerMcpConfigs() {
-  console.log(`\nflex-mcp-server: ${dryRun ? 'checking' : 'registering'} MCP configs\n`);
+  console.log(`\nfrida-mcp-server: ${dryRun ? 'checking' : 'registering'} MCP configs\n`);
 
   const targets = getConfigTargets();
   let configured = 0;
@@ -530,8 +530,8 @@ function install() {
   console.log('\nCurrent stdio MCP config:\n');
   printMcpConfig();
   console.log('\nUseful commands:');
-  console.log('  flex-mcp-server doctor');
-  console.log('  flex-mcp-server serve --transport sse --port 8099');
+  console.log('  frida-mcp-server doctor');
+  console.log('  frida-mcp-server serve --transport sse --port 8099');
   console.log();
 }
 
@@ -548,7 +548,7 @@ function serve() {
 
   child.on('error', (error) => {
     console.error(`Failed to start Python command "${PYTHON}": ${error.message}`);
-    console.error('Set FLEX_MCP_PYTHON to the Python executable you want to use.');
+    console.error('Set FRIDA_MCP_PYTHON to the Python executable you want to use.');
     process.exit(1);
   });
 
@@ -615,6 +615,6 @@ if (command === 'install') {
   doctor();
 } else {
   console.error(`Unknown command: ${command}`);
-  console.error('Run: flex-mcp-server help');
+  console.error('Run: frida-mcp-server help');
   process.exit(1);
 }

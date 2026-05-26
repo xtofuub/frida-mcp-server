@@ -273,7 +273,7 @@ def connect(bundle_id: str) -> dict:
                 raise RuntimeError("App crashed after spawn (session died)")
             method = "spawn"
 
-        sid = "flex_" + bundle_id + "_" + str(int(time.time()))
+        sid = "frida_" + bundle_id + "_" + str(int(time.time()))
         with _session_lock:
             _sessions[sid] = session
 
@@ -301,7 +301,7 @@ def spawn(bundle_id: str) -> dict:
         session = device.attach(pid)
         device.resume(pid)
         time.sleep(2)
-        sid = "flex_" + bundle_id + "_" + str(int(time.time()))
+        sid = "frida_" + bundle_id + "_" + str(int(time.time()))
         with _session_lock:
             _sessions[sid] = session
         return {"success": True, "session_id": sid, "pid": pid}
@@ -801,10 +801,10 @@ _NETWORK_CAPTURE_JS = r"""
     // requests that go through task subclasses our other hooks miss.
     function installProtocolObserver() {
         try {
-            if (ObjC.classes.FlexCaptureProtocol) return;
-            var marker = '_flex_observed';
-            var FlexCaptureProtocol = ObjC.registerClass({
-                name: 'FlexCaptureProtocol',
+            if (ObjC.classes.FridaCaptureProtocol) return;
+            var marker = '_frida_observed';
+            var FridaCaptureProtocol = ObjC.registerClass({
+                name: 'FridaCaptureProtocol',
                 super: ObjC.classes.NSURLProtocol,
                 methods: {
                     '+ canInitWithRequest:': {
@@ -845,7 +845,7 @@ _NETWORK_CAPTURE_JS = r"""
             });
 
             // Register globally for NSURLConnection-style traffic.
-            try { ObjC.classes.NSURLProtocol.registerClass_(FlexCaptureProtocol); } catch(e) {}
+            try { ObjC.classes.NSURLProtocol.registerClass_(FridaCaptureProtocol); } catch(e) {}
 
             // Swizzle -[NSURLSessionConfiguration protocolClasses] so every
             // session configuration includes our protocol at index 0.
@@ -861,7 +861,7 @@ _NETWORK_CAPTURE_JS = r"""
                                     if (!retval || retval.isNull()) return;
                                     var arr = new ObjC.Object(retval);
                                     var mut = arr.mutableCopy();
-                                    mut.insertObject_atIndex_(FlexCaptureProtocol, 0);
+                                    mut.insertObject_atIndex_(FridaCaptureProtocol, 0);
                                     retval.replace(mut);
                                 } catch(e) {}
                             }

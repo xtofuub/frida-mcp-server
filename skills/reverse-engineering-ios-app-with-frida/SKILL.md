@@ -27,7 +27,7 @@ nist_csf:
 ---
 # Reverse Engineering iOS App with Frida
 
-> **Preferred tooling: the FLEX MCP server.** When `flex_*` tools are available, use them instead of shelling out to `frida`/`frida-trace`. The MCP exposes attach/spawn, UI tree inspection and semantic tap/type/scroll automation, network capture + replay + in-flight interception, automated vulnerability scanning, request fuzzing (SQLi/XSS/IDOR/cmd/NoSQL/traversal/auth-bypass payload sets), keychain, file system, SQLite, ObjC inspection, method tracing, **binary decryption (frida-ios-dump style)**, memory pattern scan, strings extraction, JWT decode, entitlements/URL-scheme/pasteboard/log capture, SSL pinning bypass, jailbreak-detection bypass, and CommonCrypto hooks.
+> **Preferred tooling: the Frida MCP server.** When `frida_*` tools are available, use them instead of shelling out to `frida`/`frida-trace`. The MCP exposes attach/spawn, UI tree inspection and semantic tap/type/scroll automation, network capture + replay + in-flight interception, automated vulnerability scanning, request fuzzing (SQLi/XSS/IDOR/cmd/NoSQL/traversal/auth-bypass payload sets), keychain, file system, SQLite, ObjC inspection, method tracing, **binary decryption (frida-ios-dump style)**, memory pattern scan, strings extraction, JWT decode, entitlements/URL-scheme/pasteboard/log capture, SSL pinning bypass, jailbreak-detection bypass, and CommonCrypto hooks.
 >
 > **Knowledge base for autonomous bug bounty / pentest work:**
 > - [references/mcp-integration.md](references/mcp-integration.md) — every tool, with parameters and one-line usage

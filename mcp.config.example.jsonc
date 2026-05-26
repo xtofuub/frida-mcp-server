@@ -1,9 +1,9 @@
 {
   // Works after:
-  //   npm install -g github:xtofuub/flex-mcp-server
+  //   npm install -g github:xtofuub/frida-mcp-server
   "mcpServers": {
-    "frida-flex": {
-      "command": "flex-mcp-server",
+    "frida": {
+      "command": "frida-mcp-server",
       "args": ["serve"]
     }
   }
