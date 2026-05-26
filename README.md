@@ -62,7 +62,7 @@ MCP itself: scope → recon → hunt → validate → report → remember.
 |---------|-------|
 | `/scope <bundle_id>` | Confirm authorization + attach |
 | `/recon <bundle_id>` | Map & rank attack surface (passive) |
-| `/hunt <bundle_id>` | Test storage / network / crypto / runtime-logic / bypass classes |
+| `/hunt <bundle_id>` | Test storage / network / crypto / runtime-logic / paywall / bypass classes |
 | `/validate <bundle_id>` | 7-question gate + MASVS mapping; kill weak findings |
 | `/report <bundle_id>` | Impact-first report from validated findings |
 | `/pickup <bundle_id>` | Resume from memory; go straight to untested surface |
@@ -116,7 +116,7 @@ Code) and `~/.config/opencode/{command,agent}` (OpenCode). Skip with
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │               frida_mcp_server.py (Python MCP Server)         │
-│    • 64 MCP tools with short names                           │
+│    • 67 MCP tools with short names                           │
 │    • Session management with health checks                   │
 │    • JS execution engine with ObjC.schedule(mainQueue)       │
 │    • Auto-retry on dead sessions                             │
@@ -138,7 +138,7 @@ Code) and `~/.config/opencode/{command,agent}` (OpenCode). Skip with
 - **Zero FLEX dependency** — All network capture uses pure Frida NSURLSession hooks. No FLEX framework needs to be embedded in the target app.
 - **Main queue safety** — All ObjC calls are wrapped in `ObjC.schedule(ObjC.mainQueue)` to prevent UIKit/AppKit crashes from background thread access.
 - **Session resilience** — Every tool call checks session health. Dead sessions are detected, cleaned up, and the agent is informed automatically.
-- **Short tool names** — All 64 tools use concise, distinctive names (`apps`, `connect`, `requests`, `replay`, `replay_as`, `race`, `diff`, `webviews`, `swift_classes`, `har_export`, etc.) for efficient agent usage.
+- **Short tool names** — All 67 tools use concise, distinctive names (`apps`, `connect`, `requests`, `replay`, `replay_as`, `race`, `diff`, `gates`, `webviews`, `swift_classes`, `har_export`, etc.) for efficient agent usage.
 
 ---
 
@@ -309,7 +309,7 @@ frida-mcp-server serve --transport sse --port 8099
 
 ## Tool Categories
 
-The server exposes **64 tools** across 13 categories. See [TOOLS.md](TOOLS.md) for the complete reference.
+The server exposes **67 tools** across 14 categories. See [TOOLS.md](TOOLS.md) for the complete reference.
 
 ### Connection (5 tools)
 `apps`, `connect`, `spawn`, `sessions`, `disconnect`
@@ -473,21 +473,24 @@ strings(path="/path/to/Frameworks/AppBinary", min_length=20, search="password")
 
 ## Bundled Skills
 
-The package includes an **iOS Advanced Dynamic Pentest Skill** that teaches agents how to think like mobile red teamers. It covers:
+The package bundles the **`reverse-engineering-ios-app-with-frida`** skill —
+methodology that teaches agents to think like mobile red teamers and map the MCP
+tools onto each phase. It ships these reference playbooks
+(`skills/reverse-engineering-ios-app-with-frida/references/`):
 
-- API flow reconstruction and trust boundary analysis
-- Parameter mining across all input surfaces
-- Manual replication cues and replay testing
-- Authorization abuse patterns (IDOR, BOLA, cross-tenant)
-- Business logic abuse (price tampering, reward duplication)
-- Path traversal and file access testing
-- React Native / hybrid app specific techniques
-- Deep link and navigation abuse
-- Local storage and runtime secret extraction
-- Traffic analysis methodology
-- Reporting standards for high-impact findings
+| Reference | Covers |
+|-----------|--------|
+| `mcp-integration.md` | CLI-command → `mcp__frida__*` tool mapping |
+| `masvs-checklist.md` | Each MASVS v2 control → the tool that verifies it |
+| `owasp-mobile-top10.md` | OWASP Mobile Top 10 tool chains |
+| `bugbounty-playbooks.md` | Concrete attack scenarios, end to end |
+| `runtime-logic-hunting.md` | Find/flip `BOOL` decision gates (via `gates`) and verify capability |
+| `iap-paywall-testing.md` | IAP / paywall / entitlement bypass to test server-side enforcement |
+| `standards.md`, `workflows.md`, `api-reference.md` | Standards, phase workflows, tool API |
 
-The skill is automatically installed to detected agent directories during `frida-mcp-server install`.
+The skill is automatically installed to detected agent directories during
+`frida-mcp-server install`. The autonomous [orchestration kit](#autonomous-orchestration)
+(slash commands + subagents) drives these playbooks end to end.
 
 ---
 
