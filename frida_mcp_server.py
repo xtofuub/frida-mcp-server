@@ -618,6 +618,23 @@ _NETWORK_CAPTURE_JS = r"""
     var hookCount = 0;
     var hookedClasses = [];
 
+    // Enumerate ObjC class names via the runtime, NOT `for (name in ObjC.classes)`.
+    // The objc-bridge enumeration trap throws on any class whose name is not valid
+    // UTF-8 (common on jailbroken devices where injected tweaks add such classes),
+    // which would abort hook installation partway and leave responses uncaptured.
+    function safeClassNames() {
+        try {
+            var P = Module.findExportByName;
+            var fl = new NativeFunction(P(null, 'objc_copyClassList'), 'pointer', ['pointer']);
+            var fn = new NativeFunction(P(null, 'class_getName'), 'pointer', ['pointer']);
+            var cnt = Memory.alloc(4); var arr = fl(cnt); var n = cnt.readU32(); var names = [];
+            for (var i = 0; i < n; i++) {
+                try { names.push(fn(arr.add(i * Process.pointerSize).readPointer()).readUtf8String()); } catch(e) {}
+            }
+            return names;
+        } catch(e) { return []; }
+    }
+
     // Hook -[NSURLSessionTask resume] on every concrete task subclass.
     // resume() is the universal entry point for foreground, background,
     // upload, download, websocket, and stream tasks.
@@ -625,7 +642,8 @@ _NETWORK_CAPTURE_JS = r"""
         try {
             var seenImps = {};
             var classes = ObjC.classes;
-            for (var name in classes) {
+            var __cn = safeClassNames();
+            for (var __ci = 0, name = null; __ci < __cn.length; __ci++) { name = __cn[__ci];
                 if (name.indexOf('Task') === -1) continue;
                 if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
                 try {
@@ -668,7 +686,8 @@ _NETWORK_CAPTURE_JS = r"""
         try {
             var seenImps = {};
             var classes = ObjC.classes;
-            for (var name in classes) {
+            var __cn = safeClassNames();
+            for (var __ci = 0, name = null; __ci < __cn.length; __ci++) { name = __cn[__ci];
                 if (name.indexOf('Task') === -1) continue;
                 if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
                 try {
@@ -764,7 +783,8 @@ _NETWORK_CAPTURE_JS = r"""
                 '- URLSession:dataTask:didReceiveResponse:completionHandler:',
                 '- URLSession:task:didCompleteWithError:'
             ];
-            for (var name in classes) {
+            var __cn = safeClassNames();
+            for (var __ci = 0, name = null; __ci < __cn.length; __ci++) { name = __cn[__ci];
                 var cls = classes[name];
                 for (var s = 0; s < sels.length; s++) {
                     var selName = sels[s];
@@ -840,7 +860,8 @@ _NETWORK_CAPTURE_JS = r"""
             var seenImps = {};
             var classes = ObjC.classes;
             var selectors = ['- _didFinishWithError:', '- didFinishWithError:'];
-            for (var name in classes) {
+            var __cn = safeClassNames();
+            for (var __ci = 0, name = null; __ci < __cn.length; __ci++) { name = __cn[__ci];
                 if (name.indexOf('Task') === -1) continue;
                 if (name.indexOf('URL') === -1 && name.indexOf('NSCF') === -1 && name.indexOf('Session') === -1) continue;
                 var cls = classes[name];
