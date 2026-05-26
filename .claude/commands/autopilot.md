@@ -67,8 +67,12 @@ Passive first: `scan` over captured traffic, `jwt` on tokens, `strings`/`dump`
 for hardcoded secrets, `crypto_logs` (arm `crypto` per tier), `memory` scan for
 secrets. Then **ACTIVE** per tier: `fuzz` ranked params (sqli/xss/idor/path/cmd/
 nosql/auth_bypass), `replay`/`replay_as` for authz, `race` for TOCTOU,
-`intercept`/`intercept_match` to rewrite in flight. **BYPASS** per tier:
-`ssl_unpin`, `jb_bypass` to gauge defense quality. Map each result to MASVS /
+`intercept`/`intercept_match` to rewrite in flight. **IAP / paywall**: test whether
+paid features are server-enforced — flip local entitlement state (`defaults_set`,
+plist, `keychain`), flip the gate (`gates`→`exec`), force StoreKit/receipt
+validators or 3rd-party SDK caches, rewrite the entitlement response; confirm the
+server still serves paid data (`references/iap-paywall-testing.md`). **BYPASS** per
+tier: `ssl_unpin`, `jb_bypass` to gauge defense quality. Map each result to MASVS /
 OWASP MASVS using `skills/reverse-engineering-ios-app-with-frida/references/`.
 Delegate deep testing to the **ios-hunt** subagent.
 

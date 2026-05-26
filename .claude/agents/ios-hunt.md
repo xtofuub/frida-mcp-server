@@ -22,6 +22,12 @@ Work the classes:
   cmd_inj/nosql/auth_bypass/buffer_overflow), `replay`/`replay_as` for authz,
   `race` for TOCTOU, `intercept`/`intercept_match` for in-flight rewrite.
 - **Deep links**: `open_url` each scheme; look for unauthenticated state change.
+- **IAP / paywall / entitlements**: test whether paid features are enforced
+  server-side or only client-side. Flip local state (`defaults_set`, plist via
+  `files`/`read`, `keychain`), flip the entitlement gate (`gates` → `exec`), force
+  StoreKit/receipt validators, edit 3rd-party SDK caches (RevenueCat/Adapty), or
+  rewrite the entitlement response (`intercept_match`). Then check the server still
+  serves paid data. See `references/iap-paywall-testing.md`.
 - **Defense quality**: `ssl_unpin`, `jb_bypass` — trivial bypass is itself a finding.
 
 Map every candidate to a control in

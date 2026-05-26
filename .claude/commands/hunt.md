@@ -1,6 +1,6 @@
 ---
 description: Test an iOS app for vulnerabilities across storage, network, crypto, runtime-logic, and bypass classes.
-argument-hint: <bundle_id> [--mode normal|yolo] [--focus storage|network|crypto|runtime|bypass]
+argument-hint: <bundle_id> [--mode normal|yolo] [--focus storage|network|crypto|runtime|paywall|bypass]
 ---
 
 Hunt `$ARGUMENTS`. Respect the mode tiers from `/autopilot` (confirm ACTIVE +
@@ -28,6 +28,13 @@ logs and analyze.
 - `mcp__frida__race` — TOCTOU on state-changing endpoints.
 - `mcp__frida__intercept` / `intercept_match` — rewrite in-flight requests.
 - `mcp__frida__open_url` — exercise each deep-link scheme handler.
+
+**IAP / paywall / entitlements (tiered):** does the server enforce purchases, or
+does the app trust the client? Flip local state (`defaults_set`, plist via
+`files`/`read`, `keychain`), flip the gate (`gates`→`exec`), force StoreKit/receipt
+validators, edit RevenueCat/Adapty caches, or rewrite the entitlement response
+(`intercept_match`); then confirm whether paid data is still served. See
+`skills/reverse-engineering-ios-app-with-frida/references/iap-paywall-testing.md`.
 
 **Runtime logic (tiered — the interesting bugs):** delegate to **ios-runtime**.
 - `gates(app_only=True)` ranks `BOOL`-returning decision methods (by type
