@@ -8,12 +8,14 @@ log = logging.getLogger("frida")
 
 mcp = FastMCP("Frida iOS Debugger")
 _sessions = {}
+_session_meta = {}        # sid -> {"bundle_id": str} for auto-reconnect
 _traces = {}
 _named_hooks = {}
 _intercept_rules = {}
 _intercept_counter = 0
 _trace_counter = 0
 _session_lock = threading.Lock()
+_reconnect_lock = threading.Lock()
 
 # ── Device ───────────────────────────────────────────────────────────────
 
@@ -40,6 +42,15 @@ def session_alive(session):
     except Exception:
         return False
 
+def _attach_running(bundle_id):
+    """Attach to a currently-running app by bundle id. Returns session or None."""
+    device = get_usb_device()
+    for app in device.enumerate_applications():
+        if app.identifier == bundle_id and app.pid > 0:
+            return device.attach(app.pid)
+    return None
+
+
 def _get_session(session_id=""):
     with _session_lock:
         if not _sessions:
@@ -48,15 +59,62 @@ def _get_session(session_id=""):
         if sid not in _sessions:
             raise RuntimeError(f"Session '{sid}' not found. Active: {list(_sessions.keys())}")
         sess = _sessions[sid]
-        if not session_alive(sess):
-            _cleanup_session(sid)
-            try:
-                sess.detach()
-            except Exception:
-                pass
-            del _sessions[sid]
-            raise RuntimeError(f"Session '{sid}' is dead. Call connect again.")
-        return sid, sess
+        if session_alive(sess):
+            return sid, sess
+        bundle = _session_meta.get(sid, {}).get("bundle_id")
+
+    # Session is detached (USB hiccup, app backgrounded/respawned). Try to
+    # transparently re-attach to the same target instead of failing the call.
+    with _reconnect_lock:
+        with _session_lock:
+            cur = _sessions.get(sid)
+            if cur is not None and session_alive(cur):
+                return sid, cur  # another thread already reconnected
+
+        _cleanup_session(sid)
+        try:
+            sess.detach()
+        except Exception:
+            pass
+
+        if not bundle:
+            with _session_lock:
+                _sessions.pop(sid, None)
+                _session_meta.pop(sid, None)
+            raise RuntimeError(f"Session '{sid}' is dead and has no target to reconnect. Call connect again.")
+
+        try:
+            new = _attach_running(bundle)
+        except Exception as e:
+            new = None
+            log.warning("auto-reconnect to %s failed: %s", bundle, e)
+        if new is None:
+            with _session_lock:
+                _sessions.pop(sid, None)
+            raise RuntimeError(
+                f"Session '{sid}' dropped and '{bundle}' is not running. "
+                f"Reopen the app, then call connect/spawn again."
+            )
+
+        _attach_detach_logger(new, bundle)
+        with _session_lock:
+            _sessions[sid] = new
+        try:
+            _install_network_capture(sid, new)
+        except Exception as e:
+            log.warning("network capture reinstall after reconnect failed: %s", e)
+        log.info("auto-reconnected session %s to %s", sid, bundle)
+        return sid, new
+
+
+def _attach_detach_logger(session, bundle_id):
+    """Log why a session detached, to aid debugging disconnect reports."""
+    def _on_detached(reason, *args):
+        log.warning("session for %s detached: %s", bundle_id, reason)
+    try:
+        session.on("detached", _on_detached)
+    except Exception:
+        pass
 
 def _cleanup_session(sid):
     for hid in list(_traces.get(sid, {})):
@@ -93,12 +151,18 @@ _FRIDA_FATAL = tuple(
 )
 
 
-def exec_js(session, js_code, timeout=20, retries=2):
-    """Execute JS on mainQueue with retry support."""
+def exec_js(session, js_code, timeout=30, retries=2, main_queue=True):
+    """Execute JS with retry support.
+
+    main_queue=True schedules the body on the ObjC main queue (required for any
+    UI / not-thread-safe work). Set False for read-only runtime introspection
+    (class/method/ivar enumeration) so a busy main thread cannot stall the call —
+    the most common cause of 'timeout (no response)'.
+    """
     last_err = None
     for attempt in range(1 + retries):
         try:
-            return _exec_js_once(session, js_code, timeout)
+            return _exec_js_once(session, js_code, timeout, main_queue)
         except _FRIDA_FATAL:
             raise
         except Exception as e:
@@ -108,7 +172,7 @@ def exec_js(session, js_code, timeout=20, retries=2):
                 time.sleep(0.3 * (attempt + 1))
     return {"ok": False, "error": f"after {1 + retries} attempts: {last_err}"}
 
-def _exec_js_once(session, js_code, timeout):
+def _exec_js_once(session, js_code, timeout, main_queue=True):
     messages = []
     event = threading.Event()
 
@@ -143,16 +207,20 @@ def _exec_js_once(session, js_code, timeout):
         else:
             body = js_code + "\nvar __r = 'executed';"
 
-    wrapped = (
-        'ObjC.schedule(ObjC.mainQueue, function() {\n'
+    inner = (
         '    try {\n'
         '        ' + body.replace('\n', '\n        ') + '\n'
         '        send({ok: true, result: typeof __r !== "undefined" ? String(__r) : "undefined"});\n'
         '    } catch(e) {\n'
         '        send({ok: false, error: e.message, stack: e.stack});\n'
         '    }\n'
-        '});'
     )
+    if main_queue:
+        wrapped = 'ObjC.schedule(ObjC.mainQueue, function() {\n' + inner + '});'
+    else:
+        # Run directly on the current thread — safe for read-only introspection,
+        # and immune to a stalled main queue.
+        wrapped = '(function() {\n' + inner + '})();'
 
     s = session.create_script(wrapped)
     s.on("message", on_msg)
@@ -274,8 +342,10 @@ def connect(bundle_id: str) -> dict:
             method = "spawn"
 
         sid = "frida_" + bundle_id + "_" + str(int(time.time()))
+        _attach_detach_logger(session, bundle_id)
         with _session_lock:
             _sessions[sid] = session
+            _session_meta[sid] = {"bundle_id": bundle_id}
 
         net_ack = _install_network_capture(sid, session)
         if not net_ack.get("ok"):
@@ -340,6 +410,7 @@ def disconnect(session_id: str = "") -> dict:
                     except Exception:
                         pass
                     del _sessions[session_id]
+                    _session_meta.pop(session_id, None)
                 return {"success": True, "disconnected": [session_id]}
             ids = list(_sessions.keys())
             for sid in ids:
@@ -349,6 +420,7 @@ def disconnect(session_id: str = "") -> dict:
                 except Exception:
                     pass
             _sessions.clear()
+            _session_meta.clear()
             return {"success": True, "disconnected": ids}
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -2912,6 +2984,144 @@ def methods(class_name: str, include_inherited: bool = False, session_id: str = 
             if "error" in data:
                 return {"success": False, "error": data["error"]}
             return {"success": True, "count": len(data["methods"]), "superclass": data["superclass"], "methods": data["methods"]}
+        return {"success": False, "error": str(r)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+_GATES_JS = r"""(function(){
+  try {
+    var P = Module.findExportByName;
+    function nf(name, ret, args){ var p=P(null,name); return p?new NativeFunction(p,ret,args):null; }
+    var f_sel = nf('sel_registerName','pointer',['pointer']);
+    var f_im  = nf('class_getInstanceMethod','pointer',['pointer','pointer']);
+    var f_cm  = nf('class_getClassMethod','pointer',['pointer','pointer']);
+    var f_enc = nf('method_getTypeEncoding','pointer',['pointer']);
+    var f_img = nf('class_getImageName','pointer',['pointer']);
+    var f_ivl = nf('class_copyIvarList','pointer',['pointer','pointer']);
+    var f_ivn = nf('ivar_getName','pointer',['pointer']);
+    var f_ive = nf('ivar_getTypeEncoding','pointer',['pointer']);
+    if(!f_sel||!f_enc){ return JSON.stringify({error:'libobjc symbols unavailable'}); }
+
+    var mods = Process.enumerateModules();
+    var mainPath = (mods && mods[0]) ? mods[0].path : '';
+    var appOnly = __APPONLY__, search = __SEARCH__, maxC = __MAXC__, maxM = __MAXM__;
+
+    var nameRe = /(auth|login|logged|signin|session|verif|valid|premium|\bpro\b|vip|paid|purchas|subscri|trial|licen[sc]e|receipt|entitl|unlock|jailbr|root|integrity|tamper|debug|\bpin\b|cert|secur|access|allow|grant|enabled|active|member|account|admin|owner|locked|gate|feature|flag|premium)/i;
+    var clsRe  = /(auth|login|session|account|user|pay|purchas|subscri|premium|billing|store|licen[sc]e|receipt|entitl|secur|jailbr|integrity|tamper|cert|\bpin\b|access|feature|flag|gate|guard|manager|service|validator)/i;
+
+    function boolish(c){ return c==='B'||c==='c'; }   // C99 bool or signed char (BOOL)
+    function argc(mn){ var n=0; for(var i=0;i<mn.length;i++) if(mn.charAt(i)===':') n++; return n; }
+    function retEnc(cls, mn){
+      try{
+        var inst = mn.charAt(0)==='-';
+        var sel  = mn.substring(2);
+        var selp = f_sel(Memory.allocUtf8String(sel));
+        var meth = inst ? f_im(cls.handle, selp) : (f_cm ? f_cm(cls.handle, selp) : NULL);
+        if(!meth || meth.isNull()) return null;
+        var e = f_enc(meth); if(!e || e.isNull()) return null;
+        var s = e.readUtf8String(); return s ? s.charAt(0) : null;
+      }catch(e){ return null; }
+    }
+    function boolIvars(cls){
+      var out=[]; if(!f_ivl||!f_ivn||!f_ive) return out;
+      try{
+        var cnt=Memory.alloc(4);
+        var lst=f_ivl(cls.handle, cnt);
+        var n=cnt.readU32();
+        if(lst && !lst.isNull()){
+          for(var j=0;j<n && j<300;j++){
+            var iv=lst.add(j*Process.pointerSize).readPointer();
+            if(iv.isNull()) continue;
+            var en=f_ive(iv); var enc=(en&&!en.isNull())?en.readUtf8String():'';
+            if(enc && boolish(enc.charAt(0))){
+              var nm=f_ivn(iv); out.push((nm&&!nm.isNull())?nm.readUtf8String():'');
+            }
+          }
+        }
+      }catch(e){}
+      return out;
+    }
+    function stem(sel){ return sel.replace(/:.*$/,'').replace(/^(is|has|should|can|did|are|was)/i,'').toLowerCase(); }
+
+    var out=[], scanned=0;
+    var keys=Object.keys(ObjC.classes);
+    for(var i=0;i<keys.length;i++){
+      if(scanned>=maxC) break;
+      var name=keys[i];
+      if(search && name.indexOf(search)===-1) continue;
+      var c=ObjC.classes[name]; if(!c) continue;
+      if(appOnly){
+        try{ var ip=f_img(c.handle); var ipath=(ip&&!ip.isNull())?ip.readUtf8String():''; if(ipath!==mainPath) continue; }
+        catch(e){ continue; }
+      }
+      scanned++;
+      var clsScore = clsRe.test(name)?2:0;
+      var bivars = boolIvars(c);
+      var meths = c.$ownMethods || [];
+      for(var k=0;k<meths.length && k<maxM;k++){
+        var mn=meths[k];
+        var rc=retEnc(c, mn);
+        if(!boolish(rc)) continue;
+        var sel=mn.substring(2);
+        var st=stem(sel);
+        var nameHit=nameRe.test(sel), zero=argc(mn)===0, backing=null;
+        for(var b=0;b<bivars.length;b++){
+          var bn=bivars[b].replace(/^_/,'').toLowerCase();
+          if(bn && st && (bn===st || bn.indexOf(st)!==-1 || st.indexOf(bn)!==-1)){ backing=bivars[b]; break; }
+        }
+        var score = 1 + clsScore + (nameHit?3:0) + (zero?1:0) + (backing?2:0);
+        var reasons=[]; if(nameHit)reasons.push('name'); if(clsScore)reasons.push('class');
+        if(zero)reasons.push('getter'); if(backing)reasons.push('ivar:'+backing); reasons.push('ret:'+rc);
+        out.push({cls:name, selector:mn, score:score, backing_ivar:backing, reasons:reasons});
+      }
+    }
+    out.sort(function(a,b){ return b.score-a.score; });
+    if(out.length>300) out=out.slice(0,300);
+    return JSON.stringify({scanned:scanned, app_only:appOnly, main_module:mainPath, count:out.length, candidates:out});
+  } catch(e){ return JSON.stringify({error:String(e)}); }
+})()"""
+
+
+@mcp.tool()
+def gates(search: str = "", app_only: bool = True, max_classes: int = 400,
+          max_methods: int = 400, session_id: str = "") -> dict:
+    """Discover and rank candidate client-side decision methods (logic gates).
+
+    Scans Objective-C classes and returns every BOOL-returning selector — found
+    by reading the method's *type encoding*, not by name — plus boolean-typed
+    ivars that back them. Each candidate is scored by several weak signals so the
+    AI can decide what is worth hooking PER APP instead of relying on a fixed list
+    of selector names (every app names things differently / may be obfuscated):
+
+      +3 selector name resembles a decision (auth/premium/valid/unlock/jailbreak…)
+      +2 declaring class name resembles a gatekeeper (auth/session/billing/guard…)
+      +2 a same-named boolean ivar backs the getter (flip the source, not the getter)
+      +1 zero-argument getter (a state read, the classic flip target)
+      +1 base, for being a boolean method at all
+
+    Name/class regexes only ADD weight — non-matching boolean methods are still
+    returned (lower score), so app-specific or non-English gates are not missed.
+    Correlate the ranking with `trace` (see which fire on a real flow) before
+    flipping. Runs off the main queue (read-only), so a busy UI won't stall it.
+
+    Args:
+        search: only scan classes whose name contains this substring.
+        app_only: restrict to classes in the app's main executable (skip frameworks).
+        max_classes / max_methods: scan caps for large apps.
+    """
+    try:
+        _, session = _get_session(session_id)
+        js = _GATES_JS.replace("__SEARCH__", json.dumps(search)) \
+                      .replace("__APPONLY__", "true" if app_only else "false") \
+                      .replace("__MAXC__", str(int(max_classes))) \
+                      .replace("__MAXM__", str(int(max_methods)))
+        r = exec_js(session, js, timeout=60, main_queue=False)
+        if r.get("ok"):
+            data = json.loads(r["result"])
+            if "error" in data:
+                return {"success": False, "error": data["error"]}
+            return {"success": True, **data}
         return {"success": False, "error": str(r)}
     except Exception as e:
         return {"success": False, "error": str(e)}

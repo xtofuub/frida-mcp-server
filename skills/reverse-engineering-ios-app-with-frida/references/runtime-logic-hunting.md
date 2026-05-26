@@ -8,24 +8,38 @@ should be deciding.
 
 All `mcp__frida__*`. Target is always supplied; never hardcode an app.
 
-## 1. Find candidate gate methods
+## 1. Discover candidate gate methods — let the tool rank, don't hardcode names
+
+**Every app is different** — gate methods may be named in another language, use
+in-house jargon, or be obfuscated. Do not rely on a fixed list of selector names.
+Use the `gates` tool: it reads each method's **ObjC type encoding** to find *all*
+`BOOL`-returning selectors (name-independent), detects boolean ivars that back
+them, and scores each candidate by several weak signals.
 
 ```
-classes(search="App")                 # app-owned namespaces (skip UIKit/Foundation)
-methods(class_name="LoginManager")     # list selectors
-swift_classes(search="App"); swift_methods(class_name="...")   # Swift side
+gates(app_only=True)                   # ranked decision-method candidates
+gates(search="Account")                # narrow to a class-name substring
 ```
 
-Flag selectors whose **name and return type** smell like a local decision —
-typically `BOOL`-returning:
+Returns `{cls, selector, score, backing_ivar, reasons}` sorted by score. Signals:
+name resemblance (+3), gatekeeper class name (+2), backing boolean ivar (+2),
+zero-arg getter (+1), base (+1). **Low score ≠ ignore** — a boolean method with
+no name match can still be the real gate; it just isn't pre-weighted. Treat the
+ranking as a starting order, then confirm against the live flow (step 2).
 
-| Pattern | Examples |
-|---------|----------|
-| `is*` | `isAuthenticated`, `isPremium`, `isPro`, `isSubscribed`, `isJailbroken`, `isUnlocked`, `isValid`, `isLoggedIn` |
-| `has*` | `hasValidLicense`, `hasAccess`, `hasActiveSubscription` |
-| `should* / can* / may*` | `shouldAllowAccess`, `canPurchase`, `canBypass` |
-| `verify* / validate* / check*` | `verifyReceipt`, `validateToken`, `checkEntitlement` |
-| `*enabled / *allowed / *granted` | `featureEnabled`, `accessAllowed` |
+The classic name shapes (`isAuthenticated`, `isPremium`, `hasValidLicense`,
+`shouldAllowAccess`, `verifyReceipt`, `featureEnabled`) are only examples that
+`gates` *weights* — they are not the filter. For Swift, also enumerate
+`swift_classes` / `swift_methods`; for hand exploration, `classes` + `methods`.
+
+### "The same boolean"
+A getter like `isPremium` usually reads a backing ivar (`_isPremium`, `_premium`).
+`gates` reports it as `backing_ivar`. Several methods may consult the **same**
+underlying flag (e.g. `isPremium`, `hasActiveSubscription`, `canAccessProFeature`
+all reading one cached bool). Flip/inspect the **source ivar** (via `inspect` /
+`call` on a live instance, or hook the setter) rather than each getter, and check
+`gates` output for sibling selectors sharing a `backing_ivar` — they are one
+decision wearing many names.
 
 ## 2. Confirm it fires on the real flow (human-in-the-loop)
 

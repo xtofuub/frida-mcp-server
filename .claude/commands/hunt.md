@@ -30,8 +30,9 @@ logs and analyze.
 - `mcp__frida__open_url` — exercise each deep-link scheme handler.
 
 **Runtime logic (tiered — the interesting bugs):** delegate to **ios-runtime**.
-- Enumerate `classes`/`swift_classes` + `methods`/`swift_methods`; flag
-  `BOOL`-returning gates (`is*/has*/should*/can*/verify*/validate*`).
+- `gates(app_only=True)` ranks `BOOL`-returning decision methods (by type
+  encoding, not name) + backing ivars. Names only weight the score — don't
+  hardcode them; low-score methods can still be the real gate.
 - `trace` a candidate → user drives the flow → `trace_logs` to see which fire.
 - `exec` a return-flip (`retval.replace(ptr(1))`) or `instances`+`inspect`+`call`
   one object; re-drive the flow; **observe whether capability is gained**.

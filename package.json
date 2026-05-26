@@ -1,6 +1,6 @@
 {
   "name": "frida-mcp-server",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "MCP server for iOS app inspection with Frida — zero FLEX dependency. Ships an autonomous orchestration kit (slash commands + subagents).",
   "mcpName": "io.github.xtofuub/frida-mcp-server",
   "bin": {

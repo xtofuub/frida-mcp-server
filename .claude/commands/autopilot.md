@@ -73,10 +73,10 @@ OWASP MASVS using `skills/reverse-engineering-ios-app-with-frida/references/`.
 Delegate deep testing to the **ios-hunt** subagent.
 
 ### 4b. Logic & runtime (the interesting bugs)
-Delegate to the **ios-runtime** subagent. Enumerate app-owned classes
-(`classes`, `swift_classes`, `methods`, `swift_methods`) and flag `BOOL`-returning
-gate methods (`is*/has*/should*/can*/verify*/validate*` — `isAuthenticated`,
-`isPremium`, `isJailbroken`, `hasValidLicense`). `trace` the candidates, have the
+Delegate to the **ios-runtime** subagent. Run `gates(app_only=True)` to rank
+`BOOL`-returning decision methods by type encoding (not hardcoded names) with
+their backing ivars; `classes`/`swift_classes`/`methods`/`swift_methods` for
+deeper exploration. `trace` the top candidates, have the
 **human drive the matching flow**, `trace_logs` to see which fire. Then (BYPASS
 tier) `exec` a return-flip (`retval.replace(ptr(1))`) or `instances`+`inspect`+
 `call` a single object, re-drive the flow, and **observe whether capability is

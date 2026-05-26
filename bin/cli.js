@@ -406,22 +406,45 @@ function copyKitFiles(srcDir, dstDir) {
   return [installed, skipped];
 }
 
-function installCommands() {
-  // Slash commands + subagents are Claude Code's .md format; install only there.
+function getCommandTargets() {
+  // Clients that understand markdown slash-commands + subagents. Same .md files,
+  // different directory conventions per client.
+  const targets = [];
   const claudeRoot = AGENTS['Claude Code'];
-  if (!installClaudeCode && !pathExists(claudeRoot)) {
-    console.log('\nOrchestration kit: Claude Code (~/.claude) not detected, skipping commands/agents.');
+  if (installClaudeCode || pathExists(claudeRoot)) {
+    targets.push({
+      name: 'Claude Code',
+      commandsDir: path.join(claudeRoot, 'commands'),
+      agentsDir: path.join(claudeRoot, 'agents'),
+    });
+  }
+  if (isOpenCodeDetected()) {
+    // OpenCode uses singular command/ and agent/ under its config dir.
+    targets.push({
+      name: 'OpenCode',
+      commandsDir: path.join(OPENCODE_CONFIG_DIR, 'command'),
+      agentsDir: path.join(OPENCODE_CONFIG_DIR, 'agent'),
+    });
+  }
+  return targets;
+}
+
+function installCommands() {
+  const targets = getCommandTargets();
+  if (targets.length === 0) {
+    console.log('\nOrchestration kit: no command-capable client (Claude Code / OpenCode) detected, skipping.');
     return;
   }
 
   console.log(`\nfrida-mcp-server: ${dryRun ? 'checking' : 'installing'} orchestration kit (commands + agents)\n`);
 
-  const [cmdI, cmdS] = copyKitFiles(path.join(KIT_ROOT, 'commands'), path.join(claudeRoot, 'commands'));
-  const [agtI, agtS] = copyKitFiles(path.join(KIT_ROOT, 'agents'), path.join(claudeRoot, 'agents'));
-
   const verb = dryRun ? 'would_install' : 'installed';
-  console.log(`  Claude Code: commands ${verb}=${cmdI}, skipped=${cmdS}; agents ${verb}=${agtI}, skipped=${agtS}`);
-  console.log('  Use /autopilot <bundle_id> to drive an autonomous assessment.');
+  for (const t of targets) {
+    const [cmdI, cmdS] = copyKitFiles(path.join(KIT_ROOT, 'commands'), t.commandsDir);
+    const [agtI, agtS] = copyKitFiles(path.join(KIT_ROOT, 'agents'), t.agentsDir);
+    console.log(`  ${t.name}: commands ${verb}=${cmdI}, skipped=${cmdS}; agents ${verb}=${agtI}, skipped=${agtS}`);
+  }
+  console.log('  Use /autopilot <bundle_id> (or the autopilot prompt) to drive an autonomous assessment.');
 }
 
 function getConfigTargets() {

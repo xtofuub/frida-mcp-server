@@ -22,10 +22,14 @@ analyze. Always:
 4. Drain (`trace_logs`, `requests`, `crypto_logs`) and interpret.
 
 ## Loop
-1. **Enumerate** app-owned classes (`classes`, `swift_classes`), skip framework
-   noise. List `methods` / `swift_methods`. Flag `BOOL`-returning selectors named
-   `is*/has*/should*/can*/verify*/validate*/check*/*enabled/*allowed` —
-   `isAuthenticated`, `isPremium`, `isJailbroken`, `hasValidLicense`, etc.
+1. **Discover** with `gates(app_only=True)` — it ranks every `BOOL`-returning
+   selector (found by type encoding, not name) across app-owned classes, with
+   backing ivars and a score. **Do not hardcode selector names** — every app
+   differs; the name shapes (`isAuthenticated`/`isPremium`/`isJailbroken`/
+   `hasValidLicense`) only *weight* the score, they are not a filter. Low-score
+   boolean methods can still be the real gate. Note sibling selectors sharing a
+   `backing_ivar` — that is one decision under many names; flip the source ivar.
+   Use `classes`/`methods`/`swift_classes`/`swift_methods` for deeper hand-walk.
 2. **Confirm relevance** — `trace` candidates, have the human drive the matching
    flow (login, open paywall, launch on jailbroken device), `trace_logs` to see
    which actually fire, with what args/returns.

@@ -46,8 +46,8 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
 
 ## Autonomous Orchestration
 
-The 66 tools are the hands; the **orchestration kit** is the brain. It ships a set
-of Claude Code slash commands and subagents that let the agent run a full
+The 67 tools are the hands; the **orchestration kit** is the brain. It ships a set
+of slash commands and subagents (Claude Code and OpenCode) that let the agent run a full
 authorized assessment end-to-end — you give it a target bundle id, it drives the
 MCP itself: scope → recon → hunt → validate → report → remember.
 
@@ -91,8 +91,11 @@ flywheel — validated findings (`audit.jsonl`), winning techniques
 `/recon` ranking consults past patterns; `/pickup` resumes without re-running
 stale work. See [memory/README.md](memory/README.md).
 
-The kit installs into `~/.claude/{commands,agents}` during
-`frida-mcp-server install` (skip with `--no-commands`).
+The kit installs into the command/agent dirs of every detected, command-capable
+client during `frida-mcp-server install` — `~/.claude/{commands,agents}` (Claude
+Code) and `~/.config/opencode/{command,agent}` (OpenCode). Skip with
+`--no-commands`. The same markdown files work in both; on other MCP clients the
+67 tools are still usable directly, just without the prebuilt slash commands.
 
 ---
 
@@ -329,8 +332,13 @@ The server exposes **64 tools** across 13 categories. See [TOOLS.md](TOOLS.md) f
 ### Storage (10 tools)
 `defaults`, `defaults_set`, `keychain`, `cookies`, `files`, `read`, `pull`, `push`, `sqlite`, `sqlite_query`
 
-### Objective-C Runtime (6 tools)
-`classes`, `methods`, `instances`, `inspect`, `call`, `exec`
+### Objective-C Runtime (7 tools)
+`classes`, `methods`, `gates`, `instances`, `inspect`, `call`, `exec`
+
+`gates` ranks `BOOL`-returning decision methods (auth / paywall / jailbreak /
+license checks) by ObjC type encoding — not by hardcoded selector names — plus
+the boolean ivars that back them, so the agent finds an app's real logic gates
+even when they're named in another language or obfuscated.
 
 ### Swift Runtime (3 tools)
 `swift_modules`, `swift_classes`, `swift_methods`
@@ -499,9 +507,20 @@ Install Python dependencies:
 pip install frida frida-tools mcp
 ```
 
-### Session dies after app crash
+### Session keeps disconnecting / requests time out
 
-The server auto-detects dead sessions and cleans them up. Simply call `connect()` again to start a fresh session.
+The server now **auto-reconnects**: if a session detaches (USB hiccup, app
+backgrounded, or the app respawns), the next tool call transparently re-attaches
+to the same bundle id and reinstalls network capture — no manual `connect()`
+needed, as long as the app is still running. Detach reasons are logged. If the app
+was killed, reopen it and the next call reconnects (or call `connect`/`spawn`).
+
+`"timeout (no response)"` usually means the app's **main thread was busy** (a
+spinner, a blocking network call) when an ObjC-main-queue call was scheduled.
+Read-only introspection (`gates`, and any `exec_js` with `main_queue=False`) runs
+off the main thread and is immune to this; the default timeout is 30s with
+automatic retries. If you hit it, let the app settle and retry, or drive the
+specific UI flow first.
 
 ### Network capture shows no requests
 
@@ -544,7 +563,7 @@ frida-mcp-server/
 │   └── memory.py               # Hunt-memory JSONL helper (log/query/resume)
 ├── memory/                     # Target-scoped hunt memory (JSONL, git-ignored)
 │   └── README.md               # Memory schema
-├── frida_mcp_server.py          # Python MCP server (pure Frida, 66 tools)
+├── frida_mcp_server.py          # Python MCP server (pure Frida, 67 tools)
 ├── TOOLS.md                    # Complete tool reference with examples
 ├── README.md                   # This file
 ├── package.json                # npm package manifest

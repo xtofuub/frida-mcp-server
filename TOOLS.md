@@ -88,6 +88,7 @@ Use these tools only on apps and devices you own or are authorized to test.
 | --- | --- |
 | `classes(search, limit, session_id)` | Search loaded ObjC classes. |
 | `methods(class_name, include_inherited, session_id)` | List methods for a class. |
+| `gates(search, app_only, max_classes, max_methods, session_id)` | Discover + rank `BOOL`-returning decision methods (auth/paywall/jailbreak/license) by ObjC type encoding, with backing ivars. Names only weight the score — not a filter. |
 | `instances(class_name, limit, session_id)` | Find live heap instances. |
 | `inspect(target, session_id)` | Inspect class, pointer, or object (ivars, description). |
 | `call(target, selector, args, session_id)` | Invoke an ObjC selector with typed arguments. |
