@@ -20,6 +20,14 @@ target is given, run `mcp__frida__apps` and ask which bundle id to drive.
 | `normal` | Run passive phases automatically. Confirm before **ACTIVE** and **BYPASS** actions. |
 | `yolo` | Full auto. No prompts after the scope gate. Assumes a clearly authorized engagement. |
 
+## No UI control — drive the human
+The MCP cannot tap buttons or navigate screens. Whenever a flow needs UI input
+(login, opening a paywall, triggering a request, launching a gated screen):
+**hook/trace first, then instruct the user precisely** ("In the app, tap 'Log In'
+and submit. Reply when done."), wait for confirmation, then drain logs
+(`trace_logs`, `requests`, `crypto_logs`) and analyze. Never assume an action
+happened — wait for the human.
+
 **Action tiers** (governs when to pause):
 - **PASSIVE** (always auto): `apps connect info entitlements modules schemes classes methods requests monitor search endpoints keychain defaults cookies files read sqlite sqlite_query pasteboard strings dump scan jwt logs crypto_logs instances inspect swift_modules swift_classes swift_methods ws_frames webviews har_export`
 - **ACTIVE** (confirm in paranoid+normal): `fuzz replay replay_as race open_url defaults_set intercept intercept_match intercept_toggle intercept_rm webview_eval call exec pull spawn`
@@ -63,6 +71,17 @@ nosql/auth_bypass), `replay`/`replay_as` for authz, `race` for TOCTOU,
 `ssl_unpin`, `jb_bypass` to gauge defense quality. Map each result to MASVS /
 OWASP MASVS using `skills/reverse-engineering-ios-app-with-frida/references/`.
 Delegate deep testing to the **ios-hunt** subagent.
+
+### 4b. Logic & runtime (the interesting bugs)
+Delegate to the **ios-runtime** subagent. Enumerate app-owned classes
+(`classes`, `swift_classes`, `methods`, `swift_methods`) and flag `BOOL`-returning
+gate methods (`is*/has*/should*/can*/verify*/validate*` — `isAuthenticated`,
+`isPremium`, `isJailbroken`, `hasValidLicense`). `trace` the candidates, have the
+**human drive the matching flow**, `trace_logs` to see which fire. Then (BYPASS
+tier) `exec` a return-flip (`retval.replace(ptr(1))`) or `instances`+`inspect`+
+`call` a single object, re-drive the flow, and **observe whether capability is
+actually gained**. Behavior change = client-side authorization flaw; no change =
+server-enforced (a positive control). See `references/runtime-logic-hunting.md`.
 
 ### 5. Validate
 Run every candidate through the **ios-validator** subagent (7-question gate +

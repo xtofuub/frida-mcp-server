@@ -1,0 +1,36 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.xtofuub/frida-mcp-server",
+  "description": "MCP server for authorized iOS app inspection with Frida — network capture/replay/fuzz, storage, ObjC/Swift runtime, crypto hooks, SSL/JB bypass. 66 tools, zero FLEX dependency.",
+  "repository": {
+    "url": "https://github.com/xtofuub/frida-mcp-server",
+    "source": "github"
+  },
+  "version": "1.4.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "frida-mcp-server",
+      "version": "1.4.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "FRIDA_MCP_PYTHON",
+          "description": "Python executable used to launch the server (must have frida + mcp installed). Defaults to python/python3.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

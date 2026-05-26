@@ -62,14 +62,18 @@ MCP itself: scope → recon → hunt → validate → report → remember.
 |---------|-------|
 | `/scope <bundle_id>` | Confirm authorization + attach |
 | `/recon <bundle_id>` | Map & rank attack surface (passive) |
-| `/hunt <bundle_id>` | Test storage / network / crypto / bypass classes |
+| `/hunt <bundle_id>` | Test storage / network / crypto / runtime-logic / bypass classes |
 | `/validate <bundle_id>` | 7-question gate + MASVS mapping; kill weak findings |
 | `/report <bundle_id>` | Impact-first report from validated findings |
 | `/pickup <bundle_id>` | Resume from memory; go straight to untested surface |
 | `/autopilot <bundle_id>` | Run the whole loop |
 
-**Subagents:** `ios-recon`, `ios-hunt`, `ios-validator`, `ios-reporter`
-(`.claude/agents/`).
+**Subagents:** `ios-recon`, `ios-hunt`, `ios-runtime`, `ios-validator`,
+`ios-reporter` (`.claude/agents/`). `ios-runtime` hunts client-side logic flaws —
+it enumerates ObjC/Swift `BOOL`-returning gate methods (`isAuthenticated`,
+`isPremium`, `isJailbroken`, `hasValidLicense`), traces them on real flows, flips
+the return, and checks whether capability is actually gained. Since the MCP has no
+UI control, it hooks first then asks you to drive the screen.
 
 **Autonomy modes** gate intrusive actions:
 
