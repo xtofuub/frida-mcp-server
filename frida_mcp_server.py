@@ -3005,6 +3005,11 @@ _GATES_JS = r"""(function(){
 
     var mods = Process.enumerateModules();
     var mainPath = (mods && mods[0]) ? mods[0].path : '';
+    // app bundle dir = main executable path minus its filename. app_only keeps any
+    // class whose image lives under the .app bundle (main binary + embedded
+    // .app/Frameworks/*), where the app's own + vendored logic lives; excludes
+    // shared system frameworks. Matching only the main exe misses RN/Swift/SDK code.
+    var bundleDir = mainPath.replace(/\/[^\/]*$/, '/');
     var appOnly = __APPONLY__, search = __SEARCH__, maxC = __MAXC__, maxM = __MAXM__;
 
     var nameRe = /(auth|login|logged|signin|session|verif|valid|premium|\bpro\b|vip|paid|purchas|subscri|trial|licen[sc]e|receipt|entitl|unlock|jailbr|root|integrity|tamper|debug|\bpin\b|cert|secur|access|allow|grant|enabled|active|member|account|admin|owner|locked|gate|feature|flag|premium)/i;
@@ -3052,7 +3057,7 @@ _GATES_JS = r"""(function(){
       if(search && name.indexOf(search)===-1) continue;
       var c=ObjC.classes[name]; if(!c) continue;
       if(appOnly){
-        try{ var ip=f_img(c.handle); var ipath=(ip&&!ip.isNull())?ip.readUtf8String():''; if(ipath!==mainPath) continue; }
+        try{ var ip=f_img(c.handle); var ipath=(ip&&!ip.isNull())?ip.readUtf8String():''; if(!ipath || ipath.indexOf(bundleDir)!==0) continue; }
         catch(e){ continue; }
       }
       scanned++;
@@ -3078,7 +3083,7 @@ _GATES_JS = r"""(function(){
     }
     out.sort(function(a,b){ return b.score-a.score; });
     if(out.length>300) out=out.slice(0,300);
-    return JSON.stringify({scanned:scanned, app_only:appOnly, main_module:mainPath, count:out.length, candidates:out});
+    return JSON.stringify({scanned:scanned, app_only:appOnly, main_module:mainPath, app_bundle:bundleDir, count:out.length, candidates:out});
   } catch(e){ return JSON.stringify({error:String(e)}); }
 })()"""
 
