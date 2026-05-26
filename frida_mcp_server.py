@@ -167,6 +167,13 @@ def exec_js(session, js_code, timeout=30, retries=2, main_queue=True):
             raise
         except Exception as e:
             last_err = e
+            # Fail fast — don't retry when the session is gone or the runtime
+            # timed out (a jammed main thread / dead process won't recover on a
+            # retry, and each retry burns the full frida RPC timeout ~25s).
+            if not session_alive(session):
+                return {"ok": False, "error": f"session detached: {e}"}
+            if "timeout" in str(e).lower() or "timed out" in str(e).lower():
+                return {"ok": False, "error": f"timeout (app main thread busy or unresponsive): {e}"}
             if attempt < retries:
                 log.warning("exec_js attempt %d failed: %s — retrying", attempt + 1, e)
                 time.sleep(0.3 * (attempt + 1))
@@ -1057,14 +1064,16 @@ _NETWORK_CAPTURE_JS = r"""
         } catch(e) {}
     }
 
-    ObjC.schedule(ObjC.mainQueue, function() {
-        try {
-            installAll();
-            send({__hook_init: true, ok: hookCount > 0, hooks: hookCount, classes: hookedClasses.slice(0, 20)});
-        } catch(e) {
-            send({__hook_init: true, ok: false, error: e.message});
-        }
-    });
+    // Install off the main queue: Interceptor.attach and ObjC class enumeration
+    // are thread-safe, and a freshly-spawned app's main thread is jammed during
+    // launch — scheduling the ack on mainQueue there means it never fires
+    // (manifests as "all attempts failed" and can destabilize the launching app).
+    try {
+        installAll();
+        send({__hook_init: true, ok: hookCount > 0, hooks: hookCount, classes: hookedClasses.slice(0, 20)});
+    } catch(e) {
+        send({__hook_init: true, ok: false, error: e.message});
+    }
 
     rpc.exports = {
         getTransactions: function(count) {
@@ -1128,6 +1137,9 @@ def _install_network_capture(sid, session):
                 return ack
             try: script.unload()
             except Exception: pass
+            if attempt < 2:
+                time.sleep(1)
+                continue
         except Exception as e:
             log.warning("net hook attempt %d exception: %s", attempt + 1, e)
             if attempt < 2:
@@ -2962,7 +2974,7 @@ def classes(search: str = "", limit: int = 100, session_id: str = "") -> dict:
         _, session = _get_session(session_id)
         lim = int(limit)
         sj = json.dumps(search)
-        r = exec_js(session, "(function(){ var ks=Object.keys(ObjC.classes); var ms=[]; var fl=" + sj + "; for(var i=0;i<ks.length;i++){ if(!fl||ks[i].indexOf(fl)!==-1){ var c=ObjC.classes[ks[i]]; ms.push({name:ks[i],methods:c&&c.$ownMethods?c.$ownMethods.length:0}); if(ms.length>=" + str(lim) + ")break; } } return JSON.stringify({matches:ms,total:ks.length}); })()", timeout=30)
+        r = exec_js(session, "(function(){ var P=Module.findExportByName; var fl0=new NativeFunction(P(null,'objc_copyClassList'),'pointer',['pointer']); var fn0=new NativeFunction(P(null,'class_getName'),'pointer',['pointer']); var cnt=Memory.alloc(4); var arr=fl0(cnt); var nn=cnt.readU32(); var ks=[]; for(var i0=0;i0<nn;i0++){ try{ ks.push(fn0(arr.add(i0*Process.pointerSize).readPointer()).readUtf8String()); }catch(e){} } var ms=[]; var fl=" + sj + "; for(var i=0;i<ks.length;i++){ if(!fl||ks[i].indexOf(fl)!==-1){ var c=ObjC.classes[ks[i]]; ms.push({name:ks[i],methods:c&&c.$ownMethods?c.$ownMethods.length:0}); if(ms.length>=" + str(lim) + ")break; } } return JSON.stringify({matches:ms,total:ks.length}); })()", timeout=30, main_queue=False)
         if r.get("ok"):
             data = json.loads(r["result"])
             return {"success": True, "count": len(data["matches"]), "total_classes": data["total"], "classes": data["matches"]}
@@ -3001,7 +3013,9 @@ _GATES_JS = r"""(function(){
     var f_ivl = nf('class_copyIvarList','pointer',['pointer','pointer']);
     var f_ivn = nf('ivar_getName','pointer',['pointer']);
     var f_ive = nf('ivar_getTypeEncoding','pointer',['pointer']);
-    if(!f_sel||!f_enc){ return JSON.stringify({error:'libobjc symbols unavailable'}); }
+    var f_clist = nf('objc_copyClassList','pointer',['pointer']);
+    var f_cname = nf('class_getName','pointer',['pointer']);
+    if(!f_sel||!f_enc||!f_clist||!f_cname){ return JSON.stringify({error:'libobjc symbols unavailable'}); }
 
     var mods = Process.enumerateModules();
     var mainPath = (mods && mods[0]) ? mods[0].path : '';
@@ -3050,7 +3064,12 @@ _GATES_JS = r"""(function(){
     function stem(sel){ return sel.replace(/:.*$/,'').replace(/^(is|has|should|can|did|are|was)/i,'').toLowerCase(); }
 
     var out=[], scanned=0;
-    var keys=Object.keys(ObjC.classes);
+    // Enumerate class names via the ObjC runtime (NOT Object.keys(ObjC.classes),
+    // whose bridge ownKeys trap throws on any class with a non-UTF8 name — common
+    // in obfuscated apps). Skip names that fail to decode.
+    var keys=[];
+    var __cnt=Memory.alloc(4); var __arr=f_clist(__cnt); var __n=__cnt.readU32();
+    for(var __i=0;__i<__n;__i++){ try{ keys.push(f_cname(__arr.add(__i*Process.pointerSize).readPointer()).readUtf8String()); }catch(e){} }
     for(var i=0;i<keys.length;i++){
       if(scanned>=maxC) break;
       var name=keys[i];
