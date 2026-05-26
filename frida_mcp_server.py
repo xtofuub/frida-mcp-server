@@ -3015,7 +3015,7 @@ def methods(class_name: str, include_inherited: bool = False, session_id: str = 
         _, session = _get_session(session_id)
         cn = json.dumps(class_name)
         prop = "$methods" if include_inherited else "$ownMethods"
-        r = exec_js(session, "(function(){ var c=ObjC.classes[" + cn + "]; if(!c)return JSON.stringify({error:'class not found'}); return JSON.stringify({methods:c." + prop + ",superclass:c.$superClass?c.$superClass.$className:null}); })()", timeout=20)
+        r = exec_js(session, "(function(){ var c=ObjC.classes[" + cn + "]; if(!c)return JSON.stringify({error:'class not found'}); return JSON.stringify({methods:c." + prop + ",superclass:c.$superClass?c.$superClass.$className:null}); })()", timeout=20, main_queue=False)
         if r.get("ok"):
             data = json.loads(r["result"])
             if "error" in data:
@@ -3200,7 +3200,7 @@ def inspect(target: str, session_id: str = "") -> dict:
     try:
         _, session = _get_session(session_id)
         tj = json.dumps(target)
-        r = exec_js(session, "(function(){ var t=" + tj + "; var o; if(t.indexOf('0x')===0){o=new ObjC.Object(ptr(t));}else{o=ObjC.classes[t];if(!o)return JSON.stringify({error:'class not found'});} var i={cls:o.$className||'<class>',desc:String(o).substring(0,300),ivars:{},methods:o.$ownMethods?o.$ownMethods.length:0}; if(o.$ivars){var c=0;for(var k in o.$ivars){if(c++>=50)break;try{var v=o.$ivars[k];i.ivars[k]=v!==null&&v!==undefined?String(v).substring(0,200):'nil';}catch(e){i.ivars[k]='<err>';}}} return JSON.stringify(i); })()", timeout=20)
+        r = exec_js(session, "(function(){ var t=" + tj + "; var o; if(t.indexOf('0x')===0){o=new ObjC.Object(ptr(t));}else{o=ObjC.classes[t];if(!o)return JSON.stringify({error:'class not found'});} var i={cls:o.$className||'<class>',desc:String(o).substring(0,300),ivars:{},methods:o.$ownMethods?o.$ownMethods.length:0}; if(o.$ivars){var c=0;for(var k in o.$ivars){if(c++>=50)break;try{var v=o.$ivars[k];i.ivars[k]=v!==null&&v!==undefined?String(v).substring(0,200):'nil';}catch(e){i.ivars[k]='<err>';}}} return JSON.stringify(i); })()", timeout=20, main_queue=False)
         if r.get("ok"):
             data = json.loads(r["result"])
             if "error" in data:
@@ -3547,7 +3547,7 @@ def swift_modules(session_id: str = "") -> dict:
         _, session = _get_session(session_id)
         r = exec_js(session,
             "(function(){ if (typeof Swift === 'undefined' || !Swift.available) return JSON.stringify({error:'Swift runtime not available'}); var mods = Object.keys(Swift.modules || {}); return JSON.stringify({modules: mods}); })()",
-            timeout=15)
+            timeout=15, main_queue=False)
         if not r.get("ok"):
             return {"success": False, "error": str(r)}
         data = json.loads(r["result"])
@@ -3576,7 +3576,7 @@ def swift_classes(search: str = "", module: str = "", limit: int = 100, session_
             "    out.push({module: name, name: cn}); if (out.length >= lim) return JSON.stringify({classes: out, truncated: true}); } } "
             "return JSON.stringify({classes: out, truncated: false}); })()"
         )
-        r = exec_js(session, js, timeout=20)
+        r = exec_js(session, js, timeout=20, main_queue=False)
         if not r.get("ok"):
             return {"success": False, "error": str(r)}
         data = json.loads(r["result"])
@@ -3605,7 +3605,7 @@ def swift_methods(class_name: str, module: str = "", session_id: str = "") -> di
             "var fields = []; try { for (var k2 in found.fields || {}) fields.push(k2); } catch(e) {} "
             "return JSON.stringify({module: foundMod, class: name, methods: methods, fields: fields}); })()"
         )
-        r = exec_js(session, js, timeout=20)
+        r = exec_js(session, js, timeout=20, main_queue=False)
         if not r.get("ok"):
             return {"success": False, "error": str(r)}
         data = json.loads(r["result"])
