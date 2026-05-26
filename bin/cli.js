@@ -387,8 +387,23 @@ function installSkills() {
   console.log(`\nSkills done. ${dryRun ? 'would_install' : 'installed'}=${totalInstalled}, skipped=${totalSkipped}`);
 }
 
-function copyKitFiles(srcDir, dstDir) {
-  // Copy *.md files from a kit subdir into a client dir. Returns [installed, skipped].
+function ensureOpenCodeAgentMode(content) {
+  // OpenCode requires `mode: subagent` in the frontmatter for an agent to be
+  // dispatchable via @mention / Task. Our canonical files use Claude Code's
+  // `name:` form, so inject mode only into the OpenCode copies if absent.
+  if (!content.startsWith('---')) return content;
+  const end = content.indexOf('\n---', 3);
+  if (end === -1) return content;
+  const front = content.slice(0, end);
+  if (/^mode\s*:/m.test(front)) return content;
+  // insert right after the opening fence line
+  const firstNl = content.indexOf('\n');
+  return content.slice(0, firstNl + 1) + 'mode: subagent\n' + content.slice(firstNl + 1);
+}
+
+function copyKitFiles(srcDir, dstDir, transform) {
+  // Copy *.md files from a kit subdir into a client dir, optionally transforming
+  // file content. Returns [installed, skipped].
   if (!fs.existsSync(srcDir)) return [0, 0];
   let installed = 0;
   let skipped = 0;
@@ -400,7 +415,14 @@ function copyKitFiles(srcDir, dstDir) {
       skipped += 1;
       continue;
     }
-    if (!dryRun) fs.copyFileSync(path.join(srcDir, entry.name), target);
+    if (!dryRun) {
+      const src = path.join(srcDir, entry.name);
+      if (transform) {
+        fs.writeFileSync(target, transform(fs.readFileSync(src, 'utf8')));
+      } else {
+        fs.copyFileSync(src, target);
+      }
+    }
     installed += 1;
   }
   return [installed, skipped];
@@ -419,11 +441,13 @@ function getCommandTargets() {
     });
   }
   if (isOpenCodeDetected()) {
-    // OpenCode uses singular command/ and agent/ under its config dir.
+    // OpenCode uses singular command/ and agent/ under its config dir, and
+    // requires `mode: subagent` in agent frontmatter for dispatch.
     targets.push({
       name: 'OpenCode',
       commandsDir: path.join(OPENCODE_CONFIG_DIR, 'command'),
       agentsDir: path.join(OPENCODE_CONFIG_DIR, 'agent'),
+      agentTransform: ensureOpenCodeAgentMode,
     });
   }
   return targets;
@@ -441,7 +465,7 @@ function installCommands() {
   const verb = dryRun ? 'would_install' : 'installed';
   for (const t of targets) {
     const [cmdI, cmdS] = copyKitFiles(path.join(KIT_ROOT, 'commands'), t.commandsDir);
-    const [agtI, agtS] = copyKitFiles(path.join(KIT_ROOT, 'agents'), t.agentsDir);
+    const [agtI, agtS] = copyKitFiles(path.join(KIT_ROOT, 'agents'), t.agentsDir, t.agentTransform);
     console.log(`  ${t.name}: commands ${verb}=${cmdI}, skipped=${cmdS}; agents ${verb}=${agtI}, skipped=${agtS}`);
   }
   console.log('  Use /autopilot <bundle_id> (or the autopilot prompt) to drive an autonomous assessment.');

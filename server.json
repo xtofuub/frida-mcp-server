@@ -6,12 +6,12 @@
     "url": "https://github.com/xtofuub/frida-mcp-server",
     "source": "github"
   },
-  "version": "1.5.0",
+  "version": "1.5.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "frida-mcp-server",
-      "version": "1.5.0",
+      "version": "1.5.1",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

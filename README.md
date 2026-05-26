@@ -230,10 +230,24 @@ iproxy 27042 27042 &
 
 ### Frida Server Setup
 
-1. Download the matching `frida-server` for your device architecture from [frida releases](https://github.com/frida/frida/releases)
-2. SSH into your device and make it executable: `chmod +x frida-server`
-3. Run it: `./frida-server &`
-4. Verify from your host: `frida-ps -U`
+> **Install the right Frida version — it depends on your iOS version and device.**
+> Two rules:
+>
+> 1. **Client and server versions must match exactly.** The `frida` Python package
+>    on your host and the `frida-server` on the device must be the **same version**
+>    (e.g. host `frida==16.5.9` ↔ device `frida-server 16.5.9`). A mismatch fails
+>    to attach or behaves erratically. Pin it: `pip install frida==<ver> frida-tools`.
+> 2. **The build must match your device.** Pick the `frida-server` asset for your
+>    **iOS version, CPU (`arm64` vs `arm64e`), and jailbreak type**:
+>    - **Rootful** jailbreaks (checkra1n, unc0ver, Dopamine rootful) → standard `frida-server`.
+>    - **Rootless** jailbreaks (palera1n rootless, Dopamine) → the rootless build, or install Frida via the Sileo/Cydia rootless repo.
+>    - **Newer iOS** (17/18+) needs a **recent** Frida release — older Frida won't support it. When in doubt, use the latest Frida and match the client to it.
+
+1. Find your device's iOS version and jailbreak type.
+2. Download the matching `frida-server` from [frida releases](https://github.com/frida/frida/releases) — choose the asset for your iOS arch (`arm64`/`arm64e`) at the version that matches your `frida` client (and supports your iOS).
+3. SSH into the device and make it executable: `chmod +x frida-server`
+4. Run it (rootful: `./frida-server &`; rootless typically `/var/jb/usr/sbin/frida-server &`).
+5. Verify from your host: `frida-ps -U` — should list device processes. Run `frida --version` on host and confirm it equals the `frida-server` version.
 
 ---
 
@@ -502,6 +516,9 @@ Ensure `frida-server` is running on the device and accessible via USB or network
 ```bash
 frida-ps -U
 ```
+Also confirm the **versions match** — `frida --version` (host) must equal the
+`frida-server` version on the device, and the server build must fit your iOS /
+jailbreak type. See [Frida Server Setup](#frida-server-setup).
 
 ### `ModuleNotFoundError: No module named 'frida'`
 
