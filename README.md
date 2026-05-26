@@ -9,6 +9,7 @@ Use this only on apps, devices, and programs where you have explicit authorizati
 ## Table of Contents
 
 - [What It Does](#what-it-does)
+- [Autonomous Orchestration](#autonomous-orchestration)
 - [Architecture](#architecture)
 - [Quick Install](#quick-install)
 - [Detailed Installation](#detailed-installation)
@@ -40,6 +41,54 @@ frida-mcp-server turns AI coding agents into iOS security analysts. It bridges t
 - **Binary dump** — Decrypt and dump the app's Mach-O binary (frida-ios-dump style) for offline static analysis.
 - **Crypto hooks** — Capture CommonCrypto CCCrypt calls including keys, IVs, and plaintext/ciphertext buffers.
 - **Bypasses** — One-command SSL pinning bypass and jailbreak detection evasion.
+
+---
+
+## Autonomous Orchestration
+
+The 66 tools are the hands; the **orchestration kit** is the brain. It ships a set
+of Claude Code slash commands and subagents that let the agent run a full
+authorized assessment end-to-end — you give it a target bundle id, it drives the
+MCP itself: scope → recon → hunt → validate → report → remember.
+
+> The layer is **target-agnostic**. The app under test is always a parameter
+> (`/autopilot <bundle_id>`); nothing is hardcoded to a specific app.
+
+```
+/autopilot <bundle_id> [--mode paranoid|normal|yolo]
+```
+
+| Command | Phase |
+|---------|-------|
+| `/scope <bundle_id>` | Confirm authorization + attach |
+| `/recon <bundle_id>` | Map & rank attack surface (passive) |
+| `/hunt <bundle_id>` | Test storage / network / crypto / bypass classes |
+| `/validate <bundle_id>` | 7-question gate + MASVS mapping; kill weak findings |
+| `/report <bundle_id>` | Impact-first report from validated findings |
+| `/pickup <bundle_id>` | Resume from memory; go straight to untested surface |
+| `/autopilot <bundle_id>` | Run the whole loop |
+
+**Subagents:** `ios-recon`, `ios-hunt`, `ios-validator`, `ios-reporter`
+(`.claude/agents/`).
+
+**Autonomy modes** gate intrusive actions:
+
+| Mode | Behavior |
+|------|----------|
+| `paranoid` | Confirm before every phase |
+| `normal` (default) | Passive phases auto; confirm ACTIVE (fuzz/replay/intercept/open_url) + BYPASS (ssl_unpin/jb_bypass) |
+| `yolo` | Full auto after the scope gate |
+
+A scope-and-authorization gate always runs first, in every mode.
+
+**Hunt memory** (`memory/`, via `scripts/memory.py`) is a target-scoped JSONL
+flywheel — validated findings (`audit.jsonl`), winning techniques
+(`patterns.jsonl`), and session journals with untested surface (`journal.jsonl`).
+`/recon` ranking consults past patterns; `/pickup` resumes without re-running
+stale work. See [memory/README.md](memory/README.md).
+
+The kit installs into `~/.claude/{commands,agents}` during
+`frida-mcp-server install` (skip with `--no-commands`).
 
 ---
 
@@ -200,6 +249,7 @@ iproxy 27042 27042 &
 | `--force`, `-f` | Overwrite existing installed skill directories |
 | `--no-config` | Skip MCP config registration |
 | `--no-skills` | Skip bundled skill installation |
+| `--no-commands` | Skip the orchestration kit (slash commands + subagents) |
 | `--claude-code` | Force Claude Code CLI registration attempt |
 | `--dry-run` | Show what would be installed without writing files |
 
@@ -480,11 +530,17 @@ frida-mcp-server doctor
 frida-mcp-server/
 ├── bin/
 │   └── cli.js                  # Node.js CLI wrapper (install, serve, doctor, etc.)
+├── .claude/                    # Autonomous orchestration kit (installed to ~/.claude)
+│   ├── commands/               # Slash commands: autopilot, scope, recon, hunt, validate, report, pickup
+│   └── agents/                 # Subagents: ios-recon, ios-hunt, ios-validator, ios-reporter
 ├── skills/
-│   └── ios-advanced-pentest/
-│       └── SKILL.md            # Bundled pentest methodology skill
-├── docs/                       # Additional documentation
-├── frida_mcp_server.py          # Python MCP server (pure Frida, 64 tools)
+│   └── reverse-engineering-ios-app-with-frida/
+│       └── SKILL.md            # Bundled RE methodology skill + references/
+├── scripts/
+│   └── memory.py               # Hunt-memory JSONL helper (log/query/resume)
+├── memory/                     # Target-scoped hunt memory (JSONL, git-ignored)
+│   └── README.md               # Memory schema
+├── frida_mcp_server.py          # Python MCP server (pure Frida, 66 tools)
 ├── TOOLS.md                    # Complete tool reference with examples
 ├── README.md                   # This file
 ├── package.json                # npm package manifest

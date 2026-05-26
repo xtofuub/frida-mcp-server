@@ -7,6 +7,7 @@ const { spawn, spawnSync } = require('child_process');
 
 const PKG_ROOT = path.resolve(__dirname, '..');
 const SKILLS_ROOT = path.join(PKG_ROOT, 'skills');
+const KIT_ROOT = path.join(PKG_ROOT, '.claude');
 const SERVER_PATH = path.join(PKG_ROOT, 'frida_mcp_server.py');
 const CLI_PATH = path.join(PKG_ROOT, 'bin', 'cli.js');
 const HOME = os.homedir();
@@ -36,13 +37,14 @@ const force = commandArgs.includes('--force') || commandArgs.includes('-f');
 const dryRun = commandArgs.includes('--dry-run');
 const noConfig = commandArgs.includes('--no-config');
 const noSkills = commandArgs.includes('--no-skills');
+const noCommands = commandArgs.includes('--no-commands');
 const installClaudeCode = commandArgs.includes('--claude-code');
 
 function printHelp() {
   console.log(`frida-mcp-server
 
 Usage:
-  frida-mcp-server install [--force] [--no-config] [--no-skills] [--claude-code]
+  frida-mcp-server install [--force] [--no-config] [--no-skills] [--no-commands] [--claude-code]
   frida-mcp-server register [--claude-code]
   frida-mcp-server serve [server args...]
   frida-mcp-server config
@@ -50,7 +52,8 @@ Usage:
   frida-mcp-server doctor
 
 Commands:
-  install        Install bundled skills and register MCP configs for detected clients.
+  install        Install bundled skills, the orchestration kit (slash commands +
+                 subagents, Claude Code), and register MCP configs for detected clients.
   register       Register MCP configs without copying skills.
   serve          Start the Python MCP server over stdio. Pass server args after serve.
   config         Print the stdio MCP config for this install.
@@ -61,6 +64,7 @@ Options:
   --force        Overwrite existing installed skill directories.
   --no-config    Skip MCP config registration.
   --no-skills    Skip bundled skill installation.
+  --no-commands  Skip the orchestration kit (slash commands + subagents).
   --claude-code  Force a Claude Code CLI registration attempt.
   --dry-run      Show what would be installed or configured without writing files.
 
@@ -383,6 +387,43 @@ function installSkills() {
   console.log(`\nSkills done. ${dryRun ? 'would_install' : 'installed'}=${totalInstalled}, skipped=${totalSkipped}`);
 }
 
+function copyKitFiles(srcDir, dstDir) {
+  // Copy *.md files from a kit subdir into a client dir. Returns [installed, skipped].
+  if (!fs.existsSync(srcDir)) return [0, 0];
+  let installed = 0;
+  let skipped = 0;
+  if (!dryRun) fs.mkdirSync(dstDir, { recursive: true });
+  for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
+    const target = path.join(dstDir, entry.name);
+    if (fs.existsSync(target) && !force) {
+      skipped += 1;
+      continue;
+    }
+    if (!dryRun) fs.copyFileSync(path.join(srcDir, entry.name), target);
+    installed += 1;
+  }
+  return [installed, skipped];
+}
+
+function installCommands() {
+  // Slash commands + subagents are Claude Code's .md format; install only there.
+  const claudeRoot = AGENTS['Claude Code'];
+  if (!installClaudeCode && !pathExists(claudeRoot)) {
+    console.log('\nOrchestration kit: Claude Code (~/.claude) not detected, skipping commands/agents.');
+    return;
+  }
+
+  console.log(`\nfrida-mcp-server: ${dryRun ? 'checking' : 'installing'} orchestration kit (commands + agents)\n`);
+
+  const [cmdI, cmdS] = copyKitFiles(path.join(KIT_ROOT, 'commands'), path.join(claudeRoot, 'commands'));
+  const [agtI, agtS] = copyKitFiles(path.join(KIT_ROOT, 'agents'), path.join(claudeRoot, 'agents'));
+
+  const verb = dryRun ? 'would_install' : 'installed';
+  console.log(`  Claude Code: commands ${verb}=${cmdI}, skipped=${cmdS}; agents ${verb}=${agtI}, skipped=${agtS}`);
+  console.log('  Use /autopilot <bundle_id> to drive an autonomous assessment.');
+}
+
 function getConfigTargets() {
   const targets = [];
 
@@ -525,6 +566,7 @@ function registerMcpConfigs() {
 
 function install() {
   if (!noSkills) installSkills();
+  if (!noCommands) installCommands();
   if (!noConfig) registerMcpConfigs();
 
   console.log('\nCurrent stdio MCP config:\n');

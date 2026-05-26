@@ -18,8 +18,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Local agent state
-.claude/
+# Local agent state (the shipped .claude/commands + .claude/agents ARE tracked)
+.claude/settings.local.json
+.claude/settings.json
+
+# Hunt-memory runtime artifacts (schema lives in memory/README.md)
+memory/*.jsonl
+memory/*.jsonl.*
+
+# Generated assessment reports
+reports/
 
 # FLEXing source (not part of this project)
 FLEXing/
