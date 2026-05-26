@@ -551,6 +551,7 @@ _NETWORK_CAPTURE_JS = r"""
     }
 
     function pushTxn(txn) {
+        txn.__pushed = true;
         transactions.push(txn);
         if (transactions.length > maxTxns) transactions.shift();
     }
@@ -603,7 +604,10 @@ _NETWORK_CAPTURE_JS = r"""
                 try { txn.error = String(errorObj.localizedDescription()); } catch(e) {}
             }
             txn.duration_ms = Date.now() - txn.timestamp;
-            if (!wasInPending) pushTxn(txn);
+            // Push if not already in the transactions array. wrapCompletionAPI stores
+            // the request snapshot in pending WITHOUT pushing, so 'wasInPending' is the
+            // wrong signal — completion-handler responses would never surface otherwise.
+            if (!txn.__pushed) pushTxn(txn);
             // Mark completed (with bounded size to avoid leaks).
             completed[key] = txn;
             completedKeys.push(key);
