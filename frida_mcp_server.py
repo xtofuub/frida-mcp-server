@@ -22,16 +22,40 @@ _reconnect_lock = threading.Lock()
 _device_cache = None
 _device_lock = threading.Lock()
 
+def _acquire_device():
+    """Resolve the iOS device. Honors env overrides for networked frida-server,
+    falling back to USB. Set one of:
+      FRIDA_DEVICE_HOST=192.168.101.113[:27042]  -> remote frida-server over TCP
+      FRIDA_DEVICE_ID=<usbmux/device id>          -> explicit device by id
+    Otherwise the first USB device is used (original behavior).
+    """
+    host = os.environ.get("FRIDA_DEVICE_HOST")
+    if host:
+        mgr = frida.get_device_manager()
+        # add_remote_device is idempotent per host; reuse if already added.
+        for d in mgr.enumerate_devices():
+            if d.type == "remote" and d.id == host:
+                return d
+        return mgr.add_remote_device(host)
+    dev_id = os.environ.get("FRIDA_DEVICE_ID")
+    if dev_id:
+        return frida.get_device(dev_id, timeout=10)
+    return frida.get_usb_device(timeout=10)
+
+
 def get_usb_device():
     global _device_cache
     with _device_lock:
         if _device_cache is not None:
             try:
+                # A cached-but-dead device must be dropped, or every call after a
+                # frida-server/USB drop returns the same stale handle and times out.
                 _device_cache.name
+                _device_cache.is_lost()
                 return _device_cache
             except Exception:
                 _device_cache = None
-        _device_cache = frida.get_usb_device(timeout=10)
+        _device_cache = _acquire_device()
         return _device_cache
 
 # ── Session lifecycle ───────────────────────────────────────────────────
@@ -338,15 +362,14 @@ def connect(bundle_id: str) -> dict:
             else:
                 raise Exception("not running")
         except Exception:
+            method = "spawn"
             pid = device.spawn([bundle_id])
             session = device.attach(pid)
-            device.resume(pid)
-            time.sleep(5)
-            if not session_alive(session):
-                try: session.detach()
-                except Exception: pass
-                raise RuntimeError("App crashed after spawn (session died)")
-            method = "spawn"
+            # NOTE: do NOT resume yet. The process is gated (suspended) at launch.
+            # Installing network capture here — before resume — means the hooks are
+            # live from the first instruction, so the app's launch-time API burst
+            # (remote config, token refresh, bootstrap calls) is captured instead of
+            # being lost during the old resume()->sleep(5)->install gap.
 
         sid = "frida_" + bundle_id + "_" + str(int(time.time()))
         _attach_detach_logger(session, bundle_id)
@@ -357,6 +380,20 @@ def connect(bundle_id: str) -> dict:
         net_ack = _install_network_capture(sid, session)
         if not net_ack.get("ok"):
             log.warning("Network capture install: %s", net_ack.get("error", "unknown"))
+
+        if method == "spawn":
+            # Hooks are in place — now let the app run and capture the launch burst.
+            try:
+                device.resume(pid)
+            except Exception as e:
+                log.warning("resume after spawn failed: %s", e)
+            time.sleep(3)
+            if not session_alive(session):
+                _cleanup_session(sid)
+                with _session_lock:
+                    _sessions.pop(sid, None)
+                    _session_meta.pop(sid, None)
+                raise RuntimeError("App crashed after spawn (session died)")
 
         return {
             "success": True, "session_id": sid, "method": method,
@@ -2830,7 +2867,7 @@ def modules(session_id: str = "") -> dict:
     var mods = Process.enumerateModules();
     return JSON.stringify(mods.map(function(m){ return {name: m.name, base: m.base.toString(), size: m.size, path: m.path}; }));
 })()
-""")
+""", main_queue=False)
         if r.get("ok"):
             data = json.loads(r["result"])
             return {"success": True, "count": len(data), "modules": data}
