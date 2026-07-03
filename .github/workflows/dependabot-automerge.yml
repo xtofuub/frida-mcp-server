@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   automerge:
-    name: merge-safe-dependabot-updates
+    name: merge-or-close-safe-patch-updates
     if: github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -21,7 +21,7 @@ jobs:
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
-      - name: Wait for smoke check and merge patch update
+      - name: Merge passing patch updates, close failing ones
         if: ${{ steps.metadata.outputs.update-type == 'version-update:semver-patch' }}
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -36,14 +36,19 @@ jobs:
             status="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Dependency Smoke Check" --commit "$PR_SHA" --event pull_request --json status --jq '.[0].status // ""')"
             conclusion="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Dependency Smoke Check" --commit "$PR_SHA" --event pull_request --json conclusion --jq '.[0].conclusion // ""')"
             if [ "$status" = "completed" ]; then
-              if [ "$conclusion" = "success" ]; then break; fi
-              echo "Dependency Smoke Check finished with $conclusion" >&2
-              exit 1
+              break
             fi
             sleep 30
           done
+
           if [ "$status" != "completed" ]; then
-            echo "Timed out waiting for Dependency Smoke Check" >&2
-            exit 1
+            gh pr close "$PR_URL" --delete-branch --comment "Closing automatically because the dependency smoke check did not complete in time."
+            exit 0
           fi
+
+          if [ "$conclusion" != "success" ]; then
+            gh pr close "$PR_URL" --delete-branch --comment "Closing automatically because the dependency smoke check failed. No dependency change was merged."
+            exit 0
+          fi
+
           gh pr merge "$PR_URL" --squash --delete-branch
